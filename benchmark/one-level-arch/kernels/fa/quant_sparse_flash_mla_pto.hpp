@@ -294,7 +294,11 @@ void quant_sparse_flash_mla_tadd_4pe_bsnd_pto(
                     TLOAD<tileQMatrix, 1>(tQShared, gQ);
                     TLOAD(tKSrc, gK);
                     TTRANS(tKLocal, tKSrc);
-                    TMOV_L2S_PUBLISH(tKShared, tKLocal);
+                    // Canonical Function-2 Shared publish: a one-hot issuer
+                    // (PE0) publishes the complete parent; other PEs execute
+                    // the same instruction but contribute nothing (the model
+                    // ignores non-participating PEs, like sparse-mask TLOAD).
+                    TMOV_L2S_PUBLISH<1>(tKShared, tKLocal);
                     if (dd == 0) {
                         TMATMUL(tScoreCube, tQShared, tKShared,
                                 fixp::keep_acc());
@@ -412,7 +416,8 @@ void quant_sparse_flash_mla_tadd_4pe_bsnd_pto(
                     TLOAD<tileQMatrix, 1>(tQShared, gQ);
                     TLOAD(tKSrc, gK);
                     TTRANS(tKLocal, tKSrc);
-                    TMOV_L2S_PUBLISH(tKShared, tKLocal);
+                    // Canonical Function-2 Shared publish (single issuer).
+                    TMOV_L2S_PUBLISH<1>(tKShared, tKLocal);
                     if (dd == 0) {
                         TMATMUL(tScoreCube, tQShared, tKShared,
                                 fixp::keep_acc());
