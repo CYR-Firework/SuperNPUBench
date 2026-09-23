@@ -108,7 +108,7 @@ struct QsmlaV2Tiles {
     // l1d_refill_unmatched，gfrun 正常——时序模型缺口），整体保持
     // 原始 DYNAMIC 形态。
 #if defined(QSMLA_USE_CSA_TADD_4PE) || \
-    defined(QSMLA_USE_SWA_TADD_4PE) || \
+    defined(QSMLA_USE_TADD_4PE) || \
     defined(QSMLA_USE_HCA_TADD_4PE) || \
     defined(QSMLA_USE_ORI_CMP_SPARSE_TADD_4PE)
     using tileW = VecTileM32<float, kPeRows, kTk>;
@@ -535,7 +535,7 @@ static __attribute__((always_inline)) inline void qsmla_v2_visit_source_pass1(
 // 在此组合下死锁（TMA l1d_refill_unmatched → Deadlock，gfrun 正常），
 // 时序模型缺口待上游排查，该模式预处理器层回退基线路径。----
 #if defined(QSMLA_USE_CSA_TADD_4PE) || \
-    defined(QSMLA_USE_SWA_TADD_4PE) || \
+    defined(QSMLA_USE_TADD_4PE) || \
     defined(QSMLA_USE_HCA_TADD_4PE) || \
     defined(QSMLA_USE_ORI_CMP_SPARSE_TADD_4PE)
 #define QSMLA_PV_PATH(TW, KV_DESCALE, GITV) \
@@ -668,7 +668,6 @@ static __attribute__((always_inline)) inline void qsmla_v2_store_output(
             TMULS(tFinalO, tFinalO,
                   1.0f / Tiles::kHif8ProbabilityScale);
         }
-        typename Tiles::tileOCastS tOCast;
         TCVT(tOCast, tFinalO);
         typename Tiles::itO gIterO(out_ptr + work_out_offset
                                    + env.pe_id * kPeRows * kD);
