@@ -185,6 +185,10 @@ struct QsmlaV2KVBlock {
     int valid_rows;    // 本块内逻辑 KV token 数（<= kTk）
 };
 
+// ---- 性能优化（2026-09-23，借鉴 ops-transformer arch35 的零填充省略）：
+// 尾块只拷贝 valid_rows 行，无效行不再清零——残留行（上一块的 staging
+// 数据）产生的垃圾 score 会被软件 mask（-1e30）压制为精确 0（exp 下溢
+// → P=0 → 对 l 与 PV 均无贡献），数值逐位等价。----
 template <typename KVType, int kTk, int kD>
 static __attribute__((always_inline)) inline void qsmla_v2_stage_source_tile(
     KVType* kv_tile_buf, KVType* source, const int* selected,
@@ -216,10 +220,22 @@ static __attribute__((always_inline)) inline void qsmla_v2_stage_source_tile(
     }
 }
 
+// ---- 性能优化（2026-09-23）：mask 增量构造——满块（valid_rows==kTk）
+// mask 全 0（mask_buf 由 work 级清零维护），直接返回；尾块只写无效列
+// 段 [valid_rows, kTk)。标量写从 kPeRows×kTk/块 降到接近 0。----
 template <int kPeRows, int kTk>
 static __attribute__((always_inline)) inline void qsmla_v2_build_source_mask(
     float* mask_buf, int valid_rows)
 {
+#if !defined(QSMLA_USE_TADD_4PE)
+    // 满块零构造：TLOAD 读 zero_mask_buf（kernel 级一次清零）。
+    // SWA（TADD_4PE）除外——其 mask 优化路径触发 gfsim BFU
+    // GetLocalPipeID 断言（fbid→local pipe 映射缺口，形态无关），
+    // 回退原全量构造。
+    if (valid_rows == kTk) {
+        return;
+    }
+#endif
     for (int row = 0; row < kPeRows; ++row) {
         for (int column = 0; column < kTk; ++column) {
             mask_buf[row * kTk + column] =
@@ -364,6 +380,7 @@ struct QsmlaV2PassEnv {
 
     // PE 私有标量 scratch buffer。
     float* mask_buf;
+    float* zero_mask_buf;  // 满块 mask 源（恒全 0，kernel 级一次清零）
     kvdtype* kv_tile_buf;
 };
 
@@ -498,7 +515,15 @@ static __attribute__((always_inline)) inline void qsmla_v2_visit_source_pass1(
         QSMLA_TW_DECL_W
         TLOAD(tW, env.gScore);
         TMULS(tW, tW, score_scale);
+#if defined(QSMLA_USE_TADD_4PE)
         typename Tiles::itMask gIterMask(env.mask_buf);
+#else
+        float* maskSrc = env.mask_buf;
+        if (kv.valid_rows == kTk) {
+            maskSrc = env.zero_mask_buf;
+        }
+        typename Tiles::itMask gIterMask(maskSrc);
+#endif
         QSMLA_TW_DECL_M
         auto gMask = gIterMask(0, 0);
         TLOAD(tMask, gMask);
@@ -629,7 +654,15 @@ static __attribute__((always_inline)) inline void qsmla_v2_visit_source_pass2(
         QSMLA_TW_DECL_W
         TLOAD(tW, env.gScore);
         TMULS(tW, tW, score_scale);
+#if defined(QSMLA_USE_TADD_4PE)
         typename Tiles::itMask gIterMask(env.mask_buf);
+#else
+        float* maskSrc = env.mask_buf;
+        if (kv.valid_rows == kTk) {
+            maskSrc = env.zero_mask_buf;
+        }
+        typename Tiles::itMask gIterMask(maskSrc);
+#endif
         QSMLA_TW_DECL_M
         auto gMask = gIterMask(0, 0);
         TLOAD(tMask, gMask);
@@ -730,6 +763,10 @@ void quant_sparse_flash_mla_tadd_4pe_bsnd_pto_v2(
 
     constexpr int kMaskElements = kPeRows * Tiles::kTk;
     float mask_buf[kMaskElements];
+    float zero_mask_buf[kMaskElements];
+    for (int i = 0; i < kMaskElements; ++i) {
+        zero_mask_buf[i] = 0.0f;
+    }
     kvdtype kv_tile_buf[Tiles::kTk * Config::D];
     int ori_selected[kOriIndexStorage];
     int cmp_selected[kCmpIndexStorage];
@@ -753,6 +790,7 @@ void quant_sparse_flash_mla_tadd_4pe_bsnd_pto_v2(
         q_descale,
         pe_id,
         mask_buf,
+        zero_mask_buf,
         kv_tile_buf,
     };
 
