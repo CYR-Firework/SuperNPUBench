@@ -101,11 +101,38 @@ struct QsmlaV2Tiles {
     // 物理形状仍为编译期 [kPeRows, kTk] 的 M32 CELL 列阵（存储行高恒为
     // 32，128B/CELL），但有效区域在运行时设定。动态维度的 B.DIM 使用
     // 寄存器形式（"B.DIM %[reg], 0"）。
+    // Step C/D（2026-09-23，模式门控）：优化模式（csa/swa/hca/
+    // ori_cmp）tileW 族静态化（TCVT CUBE_M16/M32 要求 src/dst valid
+    // shape 一致）+ O/PV 半驻留载体（Vec location + CubeM32 布局静态
+    // valid）。ORI_SPARSE 模式 gfsim 在静态化 tileW 下死锁（TMA
+    // l1d_refill_unmatched，gfrun 正常——时序模型缺口），整体保持
+    // 原始 DYNAMIC 形态。
+#if defined(QSMLA_USE_CSA_TADD_4PE) || \
+    defined(QSMLA_USE_SWA_TADD_4PE) || \
+    defined(QSMLA_USE_HCA_TADD_4PE) || \
+    defined(QSMLA_USE_ORI_CMP_SPARSE_TADD_4PE)
+    using tileW = VecTileM32<float, kPeRows, kTk>;
+    using tileMask = tileW;
+    using tilePShard = VecTileM32<qdtype, kPeRows, kTk>;
+    using tileOCube = VecTileM32<float, kPeRows, kTd>;
+    using tileOCastS = VecTileM32<odttype, kPeRows, kTd>;
+#define QSMLA_TW_DECL_W typename Tiles::tileW tW;
+#define QSMLA_TW_DECL_M typename Tiles::tileMask tMask;
+#define QSMLA_TFINAL_DECL \
+    typename Tiles::tileOCube tFinalO; \
+    typename Tiles::tileOCastS tOCast;
+#else
     using tileW =
         VecTileM32<float, kPeRows, kTk, DYNAMIC, DYNAMIC>;
     using tileMask = tileW;
     using tilePShard =
         VecTileM32<qdtype, kPeRows, kTk, DYNAMIC, DYNAMIC>;
+#define QSMLA_TW_DECL_W typename Tiles::tileW tW(kPeRows, kTk);
+#define QSMLA_TW_DECL_M typename Tiles::tileMask tMask(kPeRows, kTk);
+#define QSMLA_TFINAL_DECL \
+    typename Tiles::tileO tFinalO(kPeRows, kTd); \
+    typename Tiles::tileOCast tOCast(kPeRows, kTd);
+#endif
     using tileO =
         VecTileM32<float, kPeRows, kTd, DYNAMIC, DYNAMIC>;
     using tileOCast =
@@ -468,11 +495,11 @@ static __attribute__((always_inline)) inline void qsmla_v2_visit_source_pass1(
         //（-1e30）保证全宽处理数值逐位等价：exp(-1e30 - m) 下溢为精确
         // 0，行 max 由有效列主导。动态 ValidCol 待上游补齐 CUBE 加载
         // 的物理列编码后恢复。
-        typename Tiles::tileW tW(kPeRows, kTk);
+        QSMLA_TW_DECL_W
         TLOAD(tW, env.gScore);
         TMULS(tW, tW, score_scale);
         typename Tiles::itMask gIterMask(env.mask_buf);
-        typename Tiles::tileMask tMask(kPeRows, kTk);
+        QSMLA_TW_DECL_M
         auto gMask = gIterMask(0, 0);
         TLOAD(tMask, gMask);
         TADD(tW, tW, tMask);
@@ -502,6 +529,66 @@ static __attribute__((always_inline)) inline void qsmla_v2_visit_source_pass1(
         TSTORE(gSumState, tSum);
     }
 }
+
+// ---- Step C/D 模式门控（2026-09-23）：P 直连 + PV fixpipe 半驻留。
+// csa/swa 已验证（gfrun 逐位一致 + gfsim 通过）；ORI_SPARSE 的 gfsim
+// 在此组合下死锁（TMA l1d_refill_unmatched → Deadlock，gfrun 正常），
+// 时序模型缺口待上游排查，该模式预处理器层回退基线路径。----
+#if defined(QSMLA_USE_CSA_TADD_4PE) || \
+    defined(QSMLA_USE_SWA_TADD_4PE) || \
+    defined(QSMLA_USE_HCA_TADD_4PE) || \
+    defined(QSMLA_USE_ORI_CMP_SPARSE_TADD_4PE)
+#define QSMLA_PV_PATH(TW, KV_DESCALE, GITV) \
+    typename Tiles::tilePLocal tPLocal; \
+    TCVT(tPLocal, (TW)); \
+    TSTORE(gMaxState, tMax); \
+    TSTORE(gSumState, tInvSum); \
+    _Pragma("clang loop unroll(disable)") \
+    for (int out_dd = 0; out_dd < kDb; ++out_dd) { \
+        auto gOState = env.gIterPV(0, out_dd); \
+        typename Tiles::tileOCube tO; \
+        TLOAD(tO, gOState); \
+        typename Tiles::tileVShared tVShared; \
+        auto gV = (GITV)(0, out_dd); \
+        TLOAD<typename Tiles::tileVMatrix, 1>(tVShared, gV); \
+        typename Tiles::tileOCube tPV; \
+        TMATMUL(tPV, tPLocal, tVShared, \
+                fixp::convert<FixpPreQuantMode::None>().transpose_b(), \
+                kGroupM); \
+        TMULS(tPV, tPV, (KV_DESCALE)); \
+        TADD(tO, tO, tPV); \
+        TSTORE(gOState, tO); \
+    }
+#else
+#define QSMLA_PV_PATH(TW, KV_DESCALE, GITV) \
+    typename Tiles::tilePShard tPShard(kPeRows, kTk); \
+    TCVT(tPShard, (TW)); \
+    auto gProbShard = env.gIterProb(env.pe_id, 0); \
+    TSTORE(gProbShard, tPShard); \
+    TSTORE(gMaxState, tMax); \
+    TSTORE(gSumState, tInvSum); \
+    _Pragma("clang loop unroll(disable)") \
+    for (int out_dd = 0; out_dd < kDb; ++out_dd) { \
+        auto gOState = env.gIterPV(0, out_dd); \
+        typename Tiles::tileO tO(kPeRows, kTd); \
+        TLOAD(tO, gOState); \
+        typename Tiles::tilePLocal tPLocal; \
+        auto gPShard = env.gIterPLocal(env.pe_id, 0); \
+        TLOAD_CUBE(tPLocal, gPShard); \
+        typename Tiles::tileVShared tVShared; \
+        auto gV = (GITV)(0, out_dd); \
+        TLOAD<typename Tiles::tileVMatrix, 1>(tVShared, gV); \
+        typename Tiles::tilePVCube tPVCube; \
+        TMATMUL(tPVCube, tPLocal, tVShared, \
+                fixp::keep_acc().transpose_b(), kGroupM); \
+        TSTORE_CUBE(gOState, tPVCube); \
+        typename Tiles::tileO tPV(kPeRows, kTd); \
+        TLOAD(tPV, gOState); \
+        TMULS(tPV, tPV, (KV_DESCALE)); \
+        TADD(tO, tO, tPV); \
+        TSTORE(gOState, tO); \
+    }
+#endif
 
 template <typename Env, typename QIter, typename KVType>
 static __attribute__((always_inline)) inline void qsmla_v2_visit_source_pass2(
@@ -539,11 +626,11 @@ static __attribute__((always_inline)) inline void qsmla_v2_visit_source_pass2(
 
         // 全宽 tileW（见 pass1 注释：CUBE 部分有效列与行归约 lb2 契约
         // 不兼容，mask 保证等价）。
-        typename Tiles::tileW tW(kPeRows, kTk);
+        QSMLA_TW_DECL_W
         TLOAD(tW, env.gScore);
         TMULS(tW, tW, score_scale);
         typename Tiles::itMask gIterMask(env.mask_buf);
-        typename Tiles::tileMask tMask(kPeRows, kTk);
+        QSMLA_TW_DECL_M
         auto gMask = gIterMask(0, 0);
         TLOAD(tMask, gMask);
         TADD(tW, tW, tMask);
@@ -554,39 +641,7 @@ static __attribute__((always_inline)) inline void qsmla_v2_visit_source_pass2(
             TMULS(tW, tW, Tiles::kHif8ProbabilityScale);
         }
 
-        // 全宽 tilePShard：P 在无效列上为精确 0（mask 下溢），写满
-        // prob_scratch 本块区域，避免残留列被 Shared 全宽读回。
-        typename Tiles::tilePShard tPShard(kPeRows, kTk);
-        TCVT(tPShard, tW);
-        auto gProbShard = env.gIterProb(env.pe_id, 0);
-        TSTORE(gProbShard, tPShard);
-
-        TSTORE(gMaxState, tMax);
-        TSTORE(gSumState, tInvSum);
-
-#pragma clang loop unroll(disable)
-        for (int out_dd = 0; out_dd < kDb; ++out_dd) {
-            auto gOState = env.gIterPV(0, out_dd);
-            typename Tiles::tileO tO(kPeRows, kTd);
-            TLOAD(tO, gOState);
-            // P 走本地 M32 Left 分片（本 PE 写入的 [kPeRows, kTk]），
-            // 与 Shared V 做 Local-A/Shared-B 协作 PV。
-            typename Tiles::tilePLocal tPLocal;
-            auto gPShard = env.gIterPLocal(env.pe_id, 0);
-            TLOAD_CUBE(tPLocal, gPShard);
-            typename Tiles::tileVShared tVShared;
-            auto gV = gIterV(0, out_dd);
-            TLOAD<typename Tiles::tileVMatrix, 1>(tVShared, gV);
-            typename Tiles::tilePVCube tPVCube;
-            TMATMUL(tPVCube, tPLocal, tVShared,
-                    fixp::keep_acc().transpose_b(), kGroupM);
-            TSTORE_CUBE(gOState, tPVCube);
-            typename Tiles::tileO tPV(kPeRows, kTd);
-            TLOAD(tPV, gOState);
-            TMULS(tPV, tPV, kv_descale);
-            TADD(tO, tO, tPV);
-            TSTORE(gOState, tO);
-        }
+        QSMLA_PV_PATH(tW, kv_descale, gIterV)
     }
 }
 
@@ -607,13 +662,13 @@ static __attribute__((always_inline)) inline void qsmla_v2_store_output(
 #pragma clang loop unroll(disable)
     for (int out_dd = 0; out_dd < kDb; ++out_dd) {
         auto gOState = env.gIterPV(0, out_dd);
-        typename Tiles::tileO tFinalO(kPeRows, kTd);
+        QSMLA_TFINAL_DECL
         TLOAD(tFinalO, gOState);
         if constexpr (Tiles::kUseHif8Probability) {
             TMULS(tFinalO, tFinalO,
                   1.0f / Tiles::kHif8ProbabilityScale);
         }
-        typename Tiles::tileOCast tOCast(kPeRows, kTd);
+        typename Tiles::tileOCastS tOCast;
         TCVT(tOCast, tFinalO);
         typename Tiles::itO gIterO(out_ptr + work_out_offset
                                    + env.pe_id * kPeRows * kD);
