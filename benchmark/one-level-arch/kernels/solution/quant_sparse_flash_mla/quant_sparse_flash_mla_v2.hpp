@@ -53,7 +53,10 @@
 
 #include <type_traits>
 #include <common/pto_tileop.hpp>
-#include "template_asm.h"
+// 方案 3（2026-09-24）：不再 include test/common/template_asm.h——其
+// MGATHER/MSCATTER 旧封装（BSTART.TMA 4/5 助记符已废弃）与 TileOP 新版
+// （BSTART.TLSU MGATHER）同名且重载决议更特化，会拦截调用并产生
+// "Match Instruction Error"。v2 不使用该头的任何其他符号。
 #include "qsmla_config.hpp"
 #include "qsmla_mode.hpp"
 
@@ -170,6 +173,30 @@ struct QsmlaV2Tiles {
     using itRowState = global_iterator<gmRowState, tileMax>;
     using gmMask = global_tensor<float, RowMajor<kPeRows, kTk>>;
     using itMask = global_iterator<gmMask, tileMask>;
+
+    // ---- 方案 3（2026-09-24）：MGATHER 引擎化 indexed gather ----
+    // 替代 staging 的标量逐 word 拷贝（45K cycles/段的纯标量独占）。
+    // IndexTile[i][j] = selected[i]*kD + j（元素下标，MGATHER 契约），
+    // 构造链：TCOLEXPAND(iota[1,kD] 广播) + TROWEXPANDADD(行首[kTk,1])
+    // + MGATHER([kTk,kD] HIF8) + TSTORE(落 staging GM 视图)。
+    // 标量残留：每块 ≤kTk 次行首下标写 + kernel 级一次 iota 构造。
+    // 注意：gather 链全部使用 RowMajor/NORM 布局（Tile 默认布局）——
+    // TCOLEXPAND 的广播源要求物理 one-row（VecTileM32 的 M32 载体物理
+    // 行高恒 32，[1,N] 逻辑行映射到 32 物理行会被 gfrun 的 COPY
+    // expansion 广播形状断言拒绝）；MGATHER dst 只做 staging 中转，
+    // 走 NORM 选择器（#207 的 CUBE_M32 是给直连 CUBE 链准备的），
+    // 之后 TSTORE 以 ND 行主序落盘，与 itK 的 RowMajor 读取匹配。
+    // FP32 做扩展算术（gfsim 的 TROWEXPAND 只建模 float/copy 路径，
+    // S32 ADD 触发 "unsupported TROWEXPAND opcode/dtype contract"），
+    // TCVT 落到 S32 下标（0..18944 均为 FP32 精确整数，RNE 无损）。
+    using tileGatherIota = Tile<Location::Vec, float, 1, kD>;
+    using tileGatherRow = Tile<Location::Vec, float, kTk, 1>;
+    using tileGatherIdxF = Tile<Location::Vec, float, kTk, kD>;
+    using tileGatherIdx = Tile<Location::Vec, int32_t, kTk, kD>;
+    using tileGatherDst = Tile<Location::Vec, kvdtype, kTk, kD>;
+    using gmGatherIota = global_tensor<float, RowMajor<1, kD>>;
+    using gmGatherRow = global_tensor<float, RowMajor<kTk, 1>>;
+    // staging 落盘复用 gmGatherKV（RowMajor<kTk, kD>）视图。
 };
 
 // =============================================================================
@@ -189,11 +216,42 @@ struct QsmlaV2KVBlock {
 // 尾块只拷贝 valid_rows 行，无效行不再清零——残留行（上一块的 staging
 // 数据）产生的垃圾 score 会被软件 mask（-1e30）压制为精确 0（exp 下溢
 // → P=0 → 对 l 与 PV 均无贡献），数值逐位等价。----
-template <typename KVType, int kTk, int kD>
+template <typename Env, typename KVType, int kTk, int kD>
 static __attribute__((always_inline)) inline void qsmla_v2_stage_source_tile(
-    KVType* kv_tile_buf, KVType* source, const int* selected,
+    Env& env, KVType* kv_tile_buf, KVType* source, const int* selected,
     int range_begin, int logical_begin, int valid_rows)
 {
+    if constexpr (std::is_same_v<KVType, __hif8>) {
+        // ---- 方案 3：MGATHER 引擎化（HIF8 路径）----
+        // 标量只写行首元素下标（≤kTk 次，非 kTk*kD/4 次 word 拷贝）；
+        // 布局/搬运全部交给 tile 链。尾块行首填 0（gather 到池首行，
+        // 无效行由软件 mask 压制，数值等价）。
+        using Tiles = typename Env::Tiles;
+        for (int row = 0; row < kTk; ++row) {
+            env.gather_row_buf[row] = row < valid_rows
+                ? static_cast<float>(selected[logical_begin + row] * kD)
+                : 0.0f;
+        }
+        typename Tiles::gmGatherIota gIota(env.gather_iota_buf);
+        typename Tiles::tileGatherIota tIota;
+        TLOAD(tIota, gIota);
+        typename Tiles::gmGatherRow gRow(env.gather_row_buf);
+        typename Tiles::tileGatherRow tRow;
+        TLOAD(tRow, gRow);
+        typename Tiles::tileGatherIdxF tIdxF0;
+        TCOLEXPAND(tIdxF0, tIota);
+        typename Tiles::tileGatherIdxF tIdxF;
+        TROWEXPANDADD(tIdxF, tIdxF0, tRow);
+        typename Tiles::tileGatherIdx tIdx;
+        TCVT(tIdx, tIdxF);
+        typename Tiles::gmGatherKV gPool(source);
+        typename Tiles::tileGatherDst tDst;
+        MGATHER(tDst, gPool, tIdx);
+        typename Tiles::gmGatherKV gStage(kv_tile_buf);
+        TSTORE(gStage, tDst);
+        return;
+    }
+    // FP16 路径：保留标量 staging（HIF8 是主优化目标）。
     for (int row = 0; row < kTk; ++row) {
         const int source_row = row < valid_rows
             ? (selected == nullptr
@@ -244,9 +302,9 @@ static __attribute__((always_inline)) inline void qsmla_v2_build_source_mask(
     }
 }
 
-template <typename KVType, int kTk, int kD, int kPeRows>
+template <typename Env, typename KVType, int kTk, int kD, int kPeRows>
 static __attribute__((always_inline)) inline QsmlaV2KVBlock<KVType> qsmla_v2_prepare_kv_block(
-    KVType* kv_tile_buf, float* mask_buf,
+    Env& env, KVType* kv_tile_buf, float* mask_buf,
     KVType* source, const int* selected,
     int range_begin, int logical_begin, int logical_count,
     int allow_direct)
@@ -260,8 +318,8 @@ static __attribute__((always_inline)) inline QsmlaV2KVBlock<KVType> qsmla_v2_pre
     if (direct_contiguous) {
         tile_ptr = source + (range_begin + logical_begin) * kD;
     } else {
-        qsmla_v2_stage_source_tile<KVType, kTk, kD>(
-            kv_tile_buf, source, selected, range_begin,
+        qsmla_v2_stage_source_tile<Env, KVType, kTk, kD>(
+            env, kv_tile_buf, source, selected, range_begin,
             logical_begin, valid_rows);
     }
     qsmla_v2_build_source_mask<kPeRows, kTk>(mask_buf, valid_rows);
@@ -381,6 +439,8 @@ struct QsmlaV2PassEnv {
     // PE 私有标量 scratch buffer。
     float* mask_buf;
     float* zero_mask_buf;  // 满块 mask 源（恒全 0，kernel 级一次清零）
+    float* gather_iota_buf;  // iota [kD] FP32（kernel 级一次构造）
+    float* gather_row_buf;   // 行首元素下标 [kTk] FP32（每块 ≤kTk 次标量写）
     kvdtype* kv_tile_buf;
 };
 
@@ -493,8 +553,8 @@ static __attribute__((always_inline)) inline void qsmla_v2_visit_source_pass1(
     auto gSumState = env.gIterSum(0, 0);
     for (int block = 0; block < block_count; ++block) {
         const int logical_begin = block * kTk;
-        const QsmlaV2KVBlock<KVType> kv = qsmla_v2_prepare_kv_block<KVType, kTk, kD, kPeRows>(
-            env.kv_tile_buf, env.mask_buf, source, selected,
+        const QsmlaV2KVBlock<KVType> kv = qsmla_v2_prepare_kv_block<Env, KVType, kTk, kD, kPeRows>(
+            env, env.kv_tile_buf, env.mask_buf, source, selected,
             range_begin, logical_begin, logical_count, allow_direct);
         typename Tiles::itK gIterK(kv.tile_ptr);
 
@@ -636,8 +696,8 @@ static __attribute__((always_inline)) inline void qsmla_v2_visit_source_pass2(
     auto gSumState = env.gIterSum(0, 0);
     for (int block = 0; block < block_count; ++block) {
         const int logical_begin = block * kTk;
-        const QsmlaV2KVBlock<KVType> kv = qsmla_v2_prepare_kv_block<KVType, kTk, kD, kPeRows>(
-            env.kv_tile_buf, env.mask_buf, source, selected,
+        const QsmlaV2KVBlock<KVType> kv = qsmla_v2_prepare_kv_block<Env, KVType, kTk, kD, kPeRows>(
+            env, env.kv_tile_buf, env.mask_buf, source, selected,
             range_begin, logical_begin, logical_count, allow_direct);
         typename Tiles::itK gIterK(kv.tile_ptr);
         typename Tiles::itV gIterV(kv.tile_ptr);
@@ -767,6 +827,12 @@ void quant_sparse_flash_mla_tadd_4pe_bsnd_pto_v2(
     for (int i = 0; i < kMaskElements; ++i) {
         zero_mask_buf[i] = 0.0f;
     }
+    // 方案 3：gather 辅助数组（iota 一次构造；行首下标每块重写）。
+    float gather_iota_buf[Config::D];
+    for (int j = 0; j < Config::D; ++j) {
+        gather_iota_buf[j] = static_cast<float>(j);
+    }
+    float gather_row_buf[Tiles::kTk];
     kvdtype kv_tile_buf[Tiles::kTk * Config::D];
     int ori_selected[kOriIndexStorage];
     int cmp_selected[kCmpIndexStorage];
@@ -791,6 +857,8 @@ void quant_sparse_flash_mla_tadd_4pe_bsnd_pto_v2(
         pe_id,
         mask_buf,
         zero_mask_buf,
+        gather_iota_buf,
+        gather_row_buf,
         kv_tile_buf,
     };
 
