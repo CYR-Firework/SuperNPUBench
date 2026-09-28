@@ -103,7 +103,7 @@ struct QsmlaConfig {
                   "N1 must be positive and divisible by N2");
     static_assert(D_ > 0 && K_ >= 0, "D must be positive and K non-negative");
     static_assert(Tm_ > 0 && Tk_ > 0 && Td_ > 0, "tile sizes must be positive");
-    static_assert(GSliceMax_ > 0 && GSliceMax_ <= 64,
+    static_assert(GSliceMax_ > 0 && GSliceMax_ <= 128,
                   "gSlice must be positive and no larger than the MM1 M block");
 
     static constexpr int B = B_;

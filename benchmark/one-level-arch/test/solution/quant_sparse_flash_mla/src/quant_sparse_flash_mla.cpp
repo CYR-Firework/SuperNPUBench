@@ -142,6 +142,12 @@ constexpr uint64_t align_up_4k(uint64_t bytes) {
     return (bytes + ALIGN - 1) & ALIGN_MASK;
 }
 
+static void init_deterministic(__hif8* data, int count, int seed) {
+    for (int i = 0; i < count; ++i) {
+        uint8_t v = static_cast<uint8_t>((seed * 31 + i * 7) & 0xFF);
+        memcpy(&data[i], &v, 1);
+    }
+}
 static void init_deterministic(__half* data, int count, int seed) {
     for (int i = 0; i < count; ++i) {
         float val = ((float)((i * 31 + seed * 17) % 100)) / 100.0f - 0.5f;
@@ -210,7 +216,7 @@ int main(){
     using odttype = __half;
 #endif
     constexpr int group_size = N1 / N2;
-    constexpr int g_slice_max = group_size < 64 ? group_size : 64;
+    constexpr int g_slice_max = group_size < 128 ? group_size : 128;
     using Config = QsmlaConfig<
         B, s1, s2, N1, N2, D, 0, kTm, kTk, kTd, g_slice_max>;
 

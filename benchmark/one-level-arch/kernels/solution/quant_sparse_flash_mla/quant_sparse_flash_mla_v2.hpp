@@ -21,7 +21,7 @@
 //      ——PTO v0.58 要求协作矩阵操作使用编译期有效形状（TMATMUL
 //      static_assert）。
 //   4. gmGatherKV / 迭代器不变（它们消费物理形状）。
-//   5. Vec tile 使用 M32 CELL 格式（BLayout::CubeM16，PTO-ISA #291）：
+//   5. Vec tile 使用 M32 CELL 格式（BLayout::CubeM32，PTO-ISA #291）：
 //      物理 carrier 为 32 行 CELL 列阵（128B/CELL），elementwise /
 //      TCVT / TLOAD / TSTORE 经 B.DATR CUBE_M32 与 ND2M32 / M322ND
 //      自动编码。行归约遵循 PTO #311：目的地是保持源物理列跨度的
@@ -88,7 +88,7 @@ struct QsmlaV2Tiles {
     // A（Q/P）改为 per-PE 本地 CUBE_M32 Left 分片 [kPeRows, ·]——
     // CubeOutputLayout 跟随本地 A 的布局，使累加器得以使用
     // CubeAccumulatorM16（纯 Shared A/B 时模型按 localM=16 强制派生
-    // CUBE_M16，与 M32 载体的布局冲突（方案 5 已回退 M16 接受 Shared 派生））。Local-A /
+    // CUBE_M16，与 方案 6：groupM=128 → localM=32 → CUBE_M32，Q 共享 + M32 兼得）。Local-A /
     // Shared-B 协作形式要求显式传入 core-total group_M（TMATMUL 五参
     // 重载，LB0 编码 group_M 而非分片行数）。
     using tileKMatrix = SharedMatrixRight<kvdtype, kTk, kTd>;
@@ -98,9 +98,9 @@ struct QsmlaV2Tiles {
     // 方案 5：Q 改 Shared（四线程共享一次 TLOAD），接受 CUBE_M16 输出
     using tileQSharedMatrix = SharedMatrixLeft<qdtype, kGroupM, kTd>;
     using tileQLocal = SharedTile<tileQSharedMatrix>;
-    using tilePLocal = CubeTileM16<qdtype, kPeRows, kTk>;   // per-PE P 分片
-    using tileScoreCube = CubeAccumulatorM16<float, kPeRows, kTk>;
-    using tilePVCube = CubeAccumulatorM16<float, kPeRows, kTd>;
+    using tilePLocal = CubeTileM32<qdtype, kPeRows, kTk>;   // per-PE P 分片
+    using tileScoreCube = CubeAccumulatorM32<float, kPeRows, kTk>;
+    using tilePVCube = CubeAccumulatorM32<float, kPeRows, kTd>;
 
     // ---- 动态 Vec tile（M32 CELL 格式）----
     // 物理形状仍为编译期 [kPeRows, kTk] 的 M32 CELL 列阵（存储行高恒为
@@ -116,11 +116,11 @@ struct QsmlaV2Tiles {
     defined(QSMLA_USE_TADD_4PE) || \
     defined(QSMLA_USE_HCA_TADD_4PE) || \
     defined(QSMLA_USE_ORI_CMP_SPARSE_TADD_4PE)
-    using tileW = VecTileM16<float, kPeRows, kTk>;
+    using tileW = VecTileM32<float, kPeRows, kTk>;
     using tileMask = tileW;
-    using tilePShard = VecTileM16<qdtype, kPeRows, kTk>;
-    using tileOCube = VecTileM16<float, kPeRows, kTd>;
-    using tileOCastS = VecTileM16<odttype, kPeRows, kTd>;
+    using tilePShard = VecTileM32<qdtype, kPeRows, kTk>;
+    using tileOCube = VecTileM32<float, kPeRows, kTd>;
+    using tileOCastS = VecTileM32<odttype, kPeRows, kTd>;
 #define QSMLA_TW_DECL_W typename Tiles::tileW tW;
 #define QSMLA_TW_DECL_M typename Tiles::tileMask tMask;
 #define QSMLA_TFINAL_DECL \
@@ -128,10 +128,10 @@ struct QsmlaV2Tiles {
     typename Tiles::tileOCastS tOCast;
 #else
     using tileW =
-        VecTileM16<float, kPeRows, kTk, DYNAMIC, DYNAMIC>;
+        VecTileM32<float, kPeRows, kTk, DYNAMIC, DYNAMIC>;
     using tileMask = tileW;
     using tilePShard =
-        VecTileM16<qdtype, kPeRows, kTk, DYNAMIC, DYNAMIC>;
+        VecTileM32<qdtype, kPeRows, kTk, DYNAMIC, DYNAMIC>;
 #define QSMLA_TW_DECL_W typename Tiles::tileW tW(kPeRows, kTk);
 #define QSMLA_TW_DECL_M typename Tiles::tileMask tMask(kPeRows, kTk);
 #define QSMLA_TFINAL_DECL \
@@ -139,17 +139,17 @@ struct QsmlaV2Tiles {
     typename Tiles::tileOCast tOCast(kPeRows, kTd);
 #endif
     using tileO =
-        VecTileM16<float, kPeRows, kTd, DYNAMIC, DYNAMIC>;
+        VecTileM32<float, kPeRows, kTd, DYNAMIC, DYNAMIC>;
     using tileOCast =
-        VecTileM16<odttype, kPeRows, kTd, DYNAMIC, DYNAMIC>;
+        VecTileM32<odttype, kPeRows, kTd, DYNAMIC, DYNAMIC>;
     // 行状态（m / l）：有效形状恒为 [kPeRows, 1]，静态声明——
     // TREDUCEPREFIXVIEW 的 SubTile 与宽载体 ValidRow 必须一致，且
     // view 的 GetValidRow() 返回编译期常量，DYNAMIC 会得到 -1。
-    using tileMax = VecTileM16<float, kPeRows, 1, kPeRows, 1>;
+    using tileMax = VecTileM32<float, kPeRows, 1, kPeRows, 1>;
     using tileSum = tileMax;
     // PTO #311 行归约宽载体：物理保持源的列跨度 [32, kTk]，有效区域
     // [kPeRows, 1]；归约结果落在首个 CELL，由 TREDUCEPREFIXVIEW 借出。
-    using tileMaxWide = VecTileM16<float, kPeRows, kTk, kPeRows, 1>;
+    using tileMaxWide = VecTileM32<float, kPeRows, kTk, kPeRows, 1>;
     using tileSumWide = tileMaxWide;
 
     // ---- GM tensor 与迭代器（物理形状）----
@@ -734,10 +734,10 @@ void quant_sparse_flash_mla_tadd_4pe_bsnd_pto_v2(
 
     static_assert(Config::N2 == 1,
                   "sparse four-PE BSND requires contiguous N2=1 KV");
-    static_assert(Config::GSliceMax == 64 && Config::G % 64 == 0,
-                  "sparse four-PE requires complete 64-head G slices");
-    static_assert(kGroupM == 64 && Tiles::kTk == 32,
-                  "sparse v1 fixes TileM=64 and TileK=32");
+    static_assert(Config::GSliceMax == 128 && Config::G % 128 == 0,
+                  "sparse four-PE requires complete 128-head G slices");
+    static_assert(kGroupM == 128 && Tiles::kTk == 32,
+                  "plan-6 fixes TileM=128 and TileK=32");
     static_assert(Config::D % Tiles::kTd == 0,
                   "sparse four-PE D-tail support is deferred");
     static_assert(!std::is_same_v<kvdtype, __hif8> || Config::D % 4 == 0,
