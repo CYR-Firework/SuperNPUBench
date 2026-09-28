@@ -39,10 +39,10 @@
 //               上下文，外加 (m, l, O) 状态生命周期辅助函数。
 //   Section 5 — qsmla_v2_compute_score_tile：经协作 TMATMUL 计算的
 //               Q @ K^T（pass1 / pass2 共用）。
-//   Section 6 — qsmla_v2_visit_source_pass1 / pass2：对单个 KV 源的
-//               两趟 online-softmax。
-//   Section 7 — qsmla_v2_store_output：HIF8 反缩放 + 类型转换 + GM
-//               写回。
+//   Section 6 — qsmla_v2_visit_source_single：对单个 KV 源的
+//               单趟 online-softmax（方案 7：QKᵀ 只算一次，O 重缩放累加）。
+//   Section 7 — qsmla_v2_store_output_single：最终 O/l 归一化 + HIF8
+//               反缩放 + 类型转换 + GM 写回。
 //   Section 8 — kernel 入口：仅做 work 循环编排。
 //
 // 重构约束：tile 对象永远在消费它的函数内部声明（tile 跨函数边界传递
@@ -252,8 +252,6 @@ static __attribute__((always_inline)) inline void qsmla_v2_stage_source_tile(
         // 挤入 InstBuffer（16 深）时存在竞争丢失（B89 案例：stid=0
         // 请求未入 buffer、3 入者只激活 1 个），串行化后任一时刻只有
         // 一个 instId 的 4 实例在 SL2，规避该缺口。链结果不被消费。
-        typename Tiles::tileGatherIdx tChain;
-        TCI(tChain, 0);
         for (int part = 0; part < Tiles::kGatherParts; ++part) {
             // iota 片天然携带列基址（iota_buf[p*32+j] = p*32+j）
             typename Tiles::gmGatherIota gIota(
@@ -266,7 +264,6 @@ static __attribute__((always_inline)) inline void qsmla_v2_stage_source_tile(
             TROWEXPANDADD(tIdxF, tIdxF0, tRow);
             typename Tiles::tileGatherIdx tIdx;
             TCVT(tIdx, tIdxF);
-            TADD(tChain, tChain, tIdx);  // 片间串行链
             typename Tiles::tileGatherDst tDst;
             MGATHER(tDst, gPool, tIdx);
             auto gStagePart = itStage(0, part);
@@ -482,19 +479,6 @@ static __attribute__((always_inline)) inline void qsmla_v2_init_row_state(Env& e
     TSTORE(gSumState, tSum);
 }
 
-// pass1 之后：把 l 替换为 1/l，供 pass2 原地缩放 P。
-template <typename Env>
-static __attribute__((always_inline)) inline void qsmla_v2_recip_row_state(Env& env)
-{
-    using Tiles = typename Env::Tiles;
-    auto gSumState = env.gIterSum(0, 0);
-    typename Tiles::tileSum tFinalSum;
-    TLOAD(tFinalSum, gSumState);
-    typename Tiles::tileSum tInvSum;
-    TRECIP(tInvSum, tFinalSum);
-    TSTORE(gSumState, tInvSum);
-}
-
 // pass2 之前：清零 PE 私有 O 累加器。
 template <typename Env>
 static __attribute__((always_inline)) inline void qsmla_v2_reset_o_state(Env& env)
@@ -549,157 +533,17 @@ static __attribute__((always_inline)) inline void qsmla_v2_compute_score_tile(
 }
 
 // =============================================================================
-// Section 6 — 单 KV 源的逐块 visitor
+// Section 6 — 单 KV 源的单趟 visitor（方案 7，2026-09-28）
 //
-// 两趟 pass 均按 kTk 宽的块遍历一个 KV 源（先 ORI 窗口/列表，模式带
-// CMP 时再走 CMP）。score tile 每块重算；pass1 维护 (m, l)；pass2 消费
-// 最终的 (m, 1/l) 构造量化 P 分片并把 PV 累加进 O。
+// QKᵀ 每块只算一次。每块内完成：online softmax 更新（m,l）→ 用运行时
+// max 立即量化 P → O 重缩放 + PV 累加。最后出口段做 O/l 最终归一化。
 //
-// 注意："score tile 缩放 + 加 mask" 序列无法提取成辅助函数，因为
-// tileW 必须保持函数局部（见文件头约束）；两个 pass 中有意保留重复。
+// P 量化语义变化（vs 两趟）：P = exp(score − m_running) × 16，不除 l。
+// O 在每次 m 更新时通过 TROWEXPANDMUL(O, O, expFactor) 重缩放补偿。
+// 数学等价但舍入路径不同——验证用 FP32 golden 容差比对（atol/rtol=2e-2）。
 // =============================================================================
 template <typename Env, typename QIter, typename KVType>
-static __attribute__((always_inline)) inline void qsmla_v2_visit_source_pass1(
-    Env& env, QIter q_iter,
-    KVType* source, const int* selected,
-    int range_begin, int logical_count, int allow_direct,
-    float kv_descale)
-{
-    using Tiles = typename Env::Tiles;
-    constexpr int kTk = Tiles::kTk;
-    constexpr int kD = Tiles::kD;
-    constexpr int kPeRows = Tiles::kPeRows;
-    const float score_scale =
-        env.softmax_scale * env.q_descale * kv_descale;
-    const int block_count = (logical_count + kTk - 1) / kTk;
-    auto gMaxState = env.gIterMax(0, 0);
-    auto gSumState = env.gIterSum(0, 0);
-    for (int block = 0; block < block_count; ++block) {
-        const int logical_begin = block * kTk;
-        const QsmlaV2KVBlock<KVType> kv = qsmla_v2_prepare_kv_block<Env, KVType, kTk, kD, kPeRows>(
-            env, env.kv_tile_buf, env.mask_buf, source, selected,
-            range_begin, logical_begin, logical_count, allow_direct);
-        typename Tiles::itK gIterK(kv.tile_ptr);
-
-        typename Tiles::tileMax tMax;
-        typename Tiles::tileSum tSum;
-        TLOAD(tMax, gMaxState);
-        TLOAD(tSum, gSumState);
-
-        qsmla_v2_compute_score_tile(env, q_iter, gIterK);
-
-        // M32 载体按全宽 valid 运行（kTk）：TLOAD_CUBE 不编码 lb2，CUBE
-        // 链上所有生产者的物理 col 都从 valid 区域派生，而 TROWMAX /
-        // TROWSUM 的 lb2 用 tile 类型的静态 Cols——部分块时两者不一致
-        // 会被模型的行归约描述符契约拒绝（Block.cpp:2536）。软件 mask
-        //（-1e30）保证全宽处理数值逐位等价：exp(-1e30 - m) 下溢为精确
-        // 0，行 max 由有效列主导。动态 ValidCol 待上游补齐 CUBE 加载
-        // 的物理列编码后恢复。
-        QSMLA_TW_DECL_W
-        TLOAD(tW, env.gScore);
-        TMULS(tW, tW, score_scale);
-#if defined(QSMLA_USE_TADD_4PE)
-        typename Tiles::itMask gIterMask(env.mask_buf);
-#else
-        float* maskSrc = env.mask_buf;
-        if (kv.valid_rows == kTk) {
-            maskSrc = env.zero_mask_buf;
-        }
-        typename Tiles::itMask gIterMask(maskSrc);
-#endif
-        QSMLA_TW_DECL_M
-        auto gMask = gIterMask(0, 0);
-        TLOAD(tMask, gMask);
-        TADD(tW, tW, tMask);
-
-        // PTO #311：行归约写入保持源物理列跨度的宽载体，再用
-        // TREDUCEPREFIXVIEW 借出首个 CELL 作为紧凑行值参与算术。
-        typename Tiles::tileMaxWide tLocalMaxWide;
-        TROWMAX(tLocalMaxWide, tW);
-        auto tLocalMax =
-            TREDUCEPREFIXVIEW<typename Tiles::tileMax>(tLocalMaxWide);
-        typename Tiles::tileMax tNewMax;
-        TMAX(tNewMax, tMax, tLocalMax);
-        typename Tiles::tileMax tScale;
-        TSUB(tScale, tMax, tNewMax);
-        TEXP(tScale, tScale);
-        typename Tiles::tileSum tScaledOldSum;
-        TMUL(tScaledOldSum, tSum, tScale);
-        TROWEXPANDSUB(tW, tW, tNewMax);
-        TEXP(tW, tW);
-        typename Tiles::tileSumWide tLocalSumWide;
-        TROWSUM(tLocalSumWide, tW);
-        auto tLocalSum =
-            TREDUCEPREFIXVIEW<typename Tiles::tileSum>(tLocalSumWide);
-        TADD(tSum, tScaledOldSum, tLocalSum);
-        tMax = tNewMax;
-        TSTORE(gMaxState, tMax);
-        TSTORE(gSumState, tSum);
-    }
-}
-
-// ---- Step C/D 模式门控（2026-09-23）：P 直连 + PV fixpipe 半驻留。
-// csa/swa 已验证（gfrun 逐位一致 + gfsim 通过）；ORI_SPARSE 的 gfsim
-// 在此组合下死锁（TMA l1d_refill_unmatched → Deadlock，gfrun 正常），
-// 时序模型缺口待上游排查，该模式预处理器层回退基线路径。----
-#if defined(QSMLA_USE_CSA_TADD_4PE) || \
-    defined(QSMLA_USE_TADD_4PE) || \
-    defined(QSMLA_USE_HCA_TADD_4PE) || \
-    defined(QSMLA_USE_ORI_CMP_SPARSE_TADD_4PE)
-#define QSMLA_PV_PATH(TW, KV_DESCALE, GITV) \
-    typename Tiles::tilePLocal tPLocal; \
-    TCVT(tPLocal, (TW)); \
-    TSTORE(gMaxState, tMax); \
-    TSTORE(gSumState, tInvSum); \
-    _Pragma("clang loop unroll(disable)") \
-    for (int out_dd = 0; out_dd < kDb; ++out_dd) { \
-        auto gOState = env.gIterPV(0, out_dd); \
-        typename Tiles::tileOCube tO; \
-        TLOAD(tO, gOState); \
-        typename Tiles::tileVShared tVShared; \
-        auto gV = (GITV)(0, out_dd); \
-        TLOAD<typename Tiles::tileVMatrix, 1>(tVShared, gV); \
-        typename Tiles::tileOCube tPV; \
-        TMATMUL(tPV, tPLocal, tVShared, \
-                fixp::convert<FixpPreQuantMode::None>().transpose_b(), \
-                kGroupM); \
-        TMULS(tPV, tPV, (KV_DESCALE)); \
-        TADD(tO, tO, tPV); \
-        TSTORE(gOState, tO); \
-    }
-#else
-#define QSMLA_PV_PATH(TW, KV_DESCALE, GITV) \
-    typename Tiles::tilePShard tPShard(kPeRows, kTk); \
-    TCVT(tPShard, (TW)); \
-    auto gProbShard = env.gIterProb(env.pe_id, 0); \
-    TSTORE(gProbShard, tPShard); \
-    TSTORE(gMaxState, tMax); \
-    TSTORE(gSumState, tInvSum); \
-    _Pragma("clang loop unroll(disable)") \
-    for (int out_dd = 0; out_dd < kDb; ++out_dd) { \
-        auto gOState = env.gIterPV(0, out_dd); \
-        typename Tiles::tileO tO(kPeRows, kTd); \
-        TLOAD(tO, gOState); \
-        typename Tiles::tilePLocal tPLocal; \
-        auto gPShard = env.gIterPLocal(env.pe_id, 0); \
-        TLOAD_CUBE(tPLocal, gPShard); \
-        typename Tiles::tileVShared tVShared; \
-        auto gV = (GITV)(0, out_dd); \
-        TLOAD<typename Tiles::tileVMatrix, 1>(tVShared, gV); \
-        typename Tiles::tilePVCube tPVCube; \
-        TMATMUL(tPVCube, tPLocal, tVShared, \
-                fixp::keep_acc().transpose_b(), kGroupM); \
-        TSTORE_CUBE(gOState, tPVCube); \
-        typename Tiles::tileO tPV(kPeRows, kTd); \
-        TLOAD(tPV, gOState); \
-        TMULS(tPV, tPV, (KV_DESCALE)); \
-        TADD(tO, tO, tPV); \
-        TSTORE(gOState, tO); \
-    }
-#endif
-
-template <typename Env, typename QIter, typename KVType>
-static __attribute__((always_inline)) inline void qsmla_v2_visit_source_pass2(
+static __attribute__((always_inline)) inline void qsmla_v2_visit_source_single(
     Env& env, QIter q_iter,
     KVType* source, const int* selected,
     int range_begin, int logical_count, int allow_direct,
@@ -726,14 +570,14 @@ static __attribute__((always_inline)) inline void qsmla_v2_visit_source_pass2(
         typename Tiles::itV gIterV(kv.tile_ptr);
 
         typename Tiles::tileMax tMax;
-        typename Tiles::tileSum tInvSum;
+        typename Tiles::tileSum tSum;
         TLOAD(tMax, gMaxState);
-        TLOAD(tInvSum, gSumState);
+        TLOAD(tSum, gSumState);
 
+        // ① score = Q·Kᵀ（只算一次——从两趟的 2 次降为 1 次）
         qsmla_v2_compute_score_tile(env, q_iter, gIterK);
 
-        // 全宽 tileW（见 pass1 注释：CUBE 部分有效列与行归约 lb2 契约
-        // 不兼容，mask 保证等价）。
+        // ② online softmax 更新 + 立即量化 P（用运行时 max，不除 l）
         QSMLA_TW_DECL_W
         TLOAD(tW, env.gScore);
         TMULS(tW, tW, score_scale);
@@ -750,23 +594,70 @@ static __attribute__((always_inline)) inline void qsmla_v2_visit_source_pass2(
         auto gMask = gIterMask(0, 0);
         TLOAD(tMask, gMask);
         TADD(tW, tW, tMask);
-        TROWEXPANDSUB(tW, tW, tMax);
+
+        // PTO #311 行归约宽载体
+        typename Tiles::tileMaxWide tLocalMaxWide;
+        TROWMAX(tLocalMaxWide, tW);
+        auto tLocalMax =
+            TREDUCEPREFIXVIEW<typename Tiles::tileMax>(tLocalMaxWide);
+        typename Tiles::tileMax tNewMax;
+        TMAX(tNewMax, tMax, tLocalMax);
+
+        // expFactor = exp(m_old − m_new)（每行一个值，O 重缩放因子）
+        typename Tiles::tileMax tScale;
+        TSUB(tScale, tMax, tNewMax);
+        TEXP(tScale, tScale);
+
+        // l 更新：l = l_old × expFactor + rowSum(exp(score − m_new))
+        typename Tiles::tileSum tScaledOldSum;
+        TMUL(tScaledOldSum, tSum, tScale);
+
+        // tW = exp(score − m_new)（同时用于 l 求和和 P 量化）
+        TROWEXPANDSUB(tW, tW, tNewMax);
         TEXP(tW, tW);
-        TROWEXPANDMUL(tW, tW, tInvSum);
+        typename Tiles::tileSumWide tLocalSumWide;
+        TROWSUM(tLocalSumWide, tW);
+        auto tLocalSum =
+            TREDUCEPREFIXVIEW<typename Tiles::tileSum>(tLocalSumWide);
+        TADD(tSum, tScaledOldSum, tLocalSum);
+        tMax = tNewMax;
+        TSTORE(gMaxState, tMax);
+        TSTORE(gSumState, tSum);
+
+        // P 量化：P = tW × 16（运行时 max，不除 l）
         if constexpr (Tiles::kUseHif8Probability) {
             TMULS(tW, tW, Tiles::kHif8ProbabilityScale);
         }
+        typename Tiles::tilePLocal tPLocal;
+        TCVT(tPLocal, tW);
 
-        QSMLA_PV_PATH(tW, kv_descale, gIterV)
+        // ③ PV 累加 + O 重缩放（dd 循环 ×8）
+#pragma clang loop unroll(disable)
+        for (int out_dd = 0; out_dd < kDb; ++out_dd) {
+            auto gOState = env.gIterPV(0, out_dd);
+            typename Tiles::tileOCube tO;
+            TLOAD(tO, gOState);
+            // ★ 方案 7：O[i][j] *= expFactor[i]（行广播乘——O 重缩放）
+            TROWEXPANDMUL(tO, tO, tScale);
+            typename Tiles::tileVShared tVShared;
+            auto gV = gIterV(0, out_dd);
+            TLOAD<typename Tiles::tileVMatrix, 1>(tVShared, gV);
+            typename Tiles::tileOCube tPV;
+            TMATMUL(tPV, tPLocal, tVShared,
+                    fixp::convert<FixpPreQuantMode::None>().transpose_b(),
+                    kGroupM);
+            TMULS(tPV, tPV, kv_descale);
+            TADD(tO, tO, tPV);
+            TSTORE(gOState, tO);
+        }
     }
 }
 
-// =============================================================================
-// Section 7 — 输出收尾：撤销 HIF8 概率缩放、转换到输出 dtype、把该 PE
-// 的 O 行写回 GM。
+// Section 7 — 输出收尾（方案 7 单趟）：最终 O/l 归一化 + HIF8 反缩放 +
+// 类型转换 + GM 写回。l 从行状态加载并求倒数，TROWEXPANDMUL 行广播除。
 // =============================================================================
 template <typename Env, typename OutType>
-static __attribute__((always_inline)) inline void qsmla_v2_store_output(
+static __attribute__((always_inline)) inline void qsmla_v2_store_output_single(
     Env& env, OutType* out_ptr,
     std::size_t work_out_offset)
 {
@@ -775,11 +666,20 @@ static __attribute__((always_inline)) inline void qsmla_v2_store_output(
     constexpr int kTd = Tiles::kTd;
     constexpr int kPeRows = Tiles::kPeRows;
     constexpr int kDb = Tiles::kDb;
+    // 加载最终 l 并求倒数
+    auto gSumState = env.gIterSum(0, 0);
+    typename Tiles::tileSum tFinalSum;
+    TLOAD(tFinalSum, gSumState);
+    typename Tiles::tileSum tInvSum;
+    TRECIP(tInvSum, tFinalSum);
+    TSTORE(gSumState, tInvSum);
 #pragma clang loop unroll(disable)
     for (int out_dd = 0; out_dd < kDb; ++out_dd) {
         auto gOState = env.gIterPV(0, out_dd);
         QSMLA_TFINAL_DECL
         TLOAD(tFinalO, gOState);
+        // ★ 方案 7：O[i][j] /= l[i]（行广播除——最终归一化）
+        TROWEXPANDMUL(tFinalO, tFinalO, tInvSum);
         if constexpr (Tiles::kUseHif8Probability) {
             TMULS(tFinalO, tFinalO,
                   1.0f / Tiles::kHif8ProbabilityScale);
@@ -792,11 +692,11 @@ static __attribute__((always_inline)) inline void qsmla_v2_store_output(
     }
 }
 
-// =============================================================================
 // Section 8 — kernel 入口：仅做 work 循环编排。
 //
-// 每个 work item：解码 ORI/CMP span → 跑 pass1（online softmax m, l）→
-// 把 l 翻转为 1/l、清零 O → 跑 pass2（P 量化 + PV 累加）→ 写回输出。
+// 每个 work item：解码 ORI/CMP span → 初始化 (m,l) + 清零 O → 单趟
+// visit_source_single（QKᵀ + online softmax + P 量化 + O 重缩放 PV
+// 累加）→ 最终 O/l 归一化出口。
 // 所有重活都在 Section 2-7。
 // =============================================================================
 template <typename qdtype, typename kvdtype, typename odttype,
@@ -908,34 +808,21 @@ void quant_sparse_flash_mla_tadd_4pe_bsnd_pto_v2(
             work, cmp_ratio,
             cmp_topk_length, cmp_sparse_indices, cmp_selected);
 
-        // Pass 1：两个源上的 online softmax 统计量 (m, l)。
+        // 方案 7 单趟：初始化状态 → 两个源各跑一遍 single visitor →
+        // 最终归一化出口（QKᵀ 从 2 次降为 1 次/块/源）。
         qsmla_v2_init_row_state(env);
-        qsmla_v2_visit_source_pass1(
-            env, q_iter, work_ori,
-            ModeConfig::HasIndexedOri ? ori_selected : nullptr,
-            ori_span.begin, ori_span.count, true, ori_kv_descale);
-        if constexpr (ModeConfig::HasCmp) {
-            qsmla_v2_visit_source_pass1(
-                env, q_iter, work_cmp,
-                ModeConfig::HasIndexedCmp ? cmp_selected : nullptr,
-                0, cmp_count, false, cmp_kv_descale);
-        }
-
-        // Pass 2：量化 P + PV 累加。
-        qsmla_v2_recip_row_state(env);
         qsmla_v2_reset_o_state(env);
-        qsmla_v2_visit_source_pass2(
+        qsmla_v2_visit_source_single(
             env, q_iter, work_ori,
             ModeConfig::HasIndexedOri ? ori_selected : nullptr,
             ori_span.begin, ori_span.count, true, ori_kv_descale);
         if constexpr (ModeConfig::HasCmp) {
-            qsmla_v2_visit_source_pass2(
+            qsmla_v2_visit_source_single(
                 env, q_iter, work_cmp,
                 ModeConfig::HasIndexedCmp ? cmp_selected : nullptr,
                 0, cmp_count, false, cmp_kv_descale);
         }
-
-        qsmla_v2_store_output(env, out_ptr, work_out_offset);
+        qsmla_v2_store_output_single(env, out_ptr, work_out_offset);
     }
 }
 
