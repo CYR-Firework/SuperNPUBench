@@ -186,17 +186,27 @@ struct QsmlaV2Tiles {
     // expansion 广播形状断言拒绝）；MGATHER dst 只做 staging 中转，
     // 走 NORM 选择器（#207 的 CUBE_M32 是给直连 CUBE 链准备的），
     // 之后 TSTORE 以 ND 行主序落盘，与 itK 的 RowMajor 读取匹配。
-    // FP32 做扩展算术（gfsim 的 TROWEXPAND 只建模 float/copy 路径，
-    // S32 ADD 触发 "unsupported TROWEXPAND opcode/dtype contract"），
-    // TCVT 落到 S32 下标（0..18944 均为 FP32 精确整数，RNE 无损）。
-    using tileGatherIota = Tile<Location::Vec, float, 1, kD>;
+    // 分片化（2026-09-28）：IndexTile 按 kGatherTile=32 列切片。两个目的：
+    // ① TCOLEXPAND 的 one-row 广播源受 gfsim 的 CELL 粒度约束
+    //    （broadcastElements <= 128B/elementBytes = 32@FP32）——[1,kD] 整行
+    //    广播触发 "unary EXPAND" 断言；[1,32] 切片恰好压线。
+    // ② MGATHER 的 IndexTile 读回通路（RWDB→TileReg bridge→CellReg）在
+    //    单指令 64KB/512 beats 大批量读下停滞（sent236/recv184 悬空）；
+    //    [32,32] S32 切片 = 4KB/32 beats，回到该通路被验证过的量级。
+    // FP32 做扩展算术（gfsim 的 TROWEXPAND 只建模 float 路径），TCVT 落
+    // S32 下标（值域均为 FP32 精确整数，RNE 无损）。
+    static constexpr int kGatherTile = 32;
+    static constexpr int kGatherParts = kD / kGatherTile;
+    using tileGatherIota = Tile<Location::Vec, float, 1, kGatherTile>;
     using tileGatherRow = Tile<Location::Vec, float, kTk, 1>;
-    using tileGatherIdxF = Tile<Location::Vec, float, kTk, kD>;
-    using tileGatherIdx = Tile<Location::Vec, int32_t, kTk, kD>;
-    using tileGatherDst = Tile<Location::Vec, kvdtype, kTk, kD>;
-    using gmGatherIota = global_tensor<float, RowMajor<1, kD>>;
+    using tileGatherIdxF = Tile<Location::Vec, float, kTk, kGatherTile>;
+    using tileGatherIdx = Tile<Location::Vec, int32_t, kTk, kGatherTile>;
+    using tileGatherDst = Tile<Location::Vec, kvdtype, kTk, kGatherTile>;
+    using gmGatherIota = global_tensor<float, RowMajor<1, kGatherTile>>;
     using gmGatherRow = global_tensor<float, RowMajor<kTk, 1>>;
-    // staging 落盘复用 gmGatherKV（RowMajor<kTk, kD>）视图。
+    // staging 落盘：按 [kTk, kGatherTile] 分片的迭代器（gmGatherKV 的
+    // 列分块，片 p 即 (0, p)——与 itK 的 (0, dd) 迭代同构）。
+    using itGatherStage = global_iterator<gmGatherKV, tileGatherDst>;
 };
 
 // =============================================================================
@@ -232,23 +242,36 @@ static __attribute__((always_inline)) inline void qsmla_v2_stage_source_tile(
                 ? static_cast<float>(selected[logical_begin + row] * kD)
                 : 0.0f;
         }
-        typename Tiles::gmGatherIota gIota(env.gather_iota_buf);
-        typename Tiles::tileGatherIota tIota;
-        TLOAD(tIota, gIota);
         typename Tiles::gmGatherRow gRow(env.gather_row_buf);
         typename Tiles::tileGatherRow tRow;
         TLOAD(tRow, gRow);
-        typename Tiles::tileGatherIdxF tIdxF0;
-        TCOLEXPAND(tIdxF0, tIota);
-        typename Tiles::tileGatherIdxF tIdxF;
-        TROWEXPANDADD(tIdxF, tIdxF0, tRow);
-        typename Tiles::tileGatherIdx tIdx;
-        TCVT(tIdx, tIdxF);
         typename Tiles::gmGatherKV gPool(source);
-        typename Tiles::tileGatherDst tDst;
-        MGATHER(tDst, gPool, tIdx);
-        typename Tiles::gmGatherKV gStage(kv_tile_buf);
-        TSTORE(gStage, tDst);
+        typename Tiles::itGatherStage itStage(kv_tile_buf);
+        // 片间依赖链（S32 TADD 读上一片的 index tile）：强制 16 片
+        // MGATHER 在 TLSU 流内串行发射——四线程的同 instId 实例并发
+        // 挤入 InstBuffer（16 深）时存在竞争丢失（B89 案例：stid=0
+        // 请求未入 buffer、3 入者只激活 1 个），串行化后任一时刻只有
+        // 一个 instId 的 4 实例在 SL2，规避该缺口。链结果不被消费。
+        typename Tiles::tileGatherIdx tChain;
+        TCI(tChain, 0);
+        for (int part = 0; part < Tiles::kGatherParts; ++part) {
+            // iota 片天然携带列基址（iota_buf[p*32+j] = p*32+j）
+            typename Tiles::gmGatherIota gIota(
+                env.gather_iota_buf + part * Tiles::kGatherTile);
+            typename Tiles::tileGatherIota tIota;
+            TLOAD(tIota, gIota);
+            typename Tiles::tileGatherIdxF tIdxF0;
+            TCOLEXPAND(tIdxF0, tIota);
+            typename Tiles::tileGatherIdxF tIdxF;
+            TROWEXPANDADD(tIdxF, tIdxF0, tRow);
+            typename Tiles::tileGatherIdx tIdx;
+            TCVT(tIdx, tIdxF);
+            TADD(tChain, tChain, tIdx);  // 片间串行链
+            typename Tiles::tileGatherDst tDst;
+            MGATHER(tDst, gPool, tIdx);
+            auto gStagePart = itStage(0, part);
+            TSTORE(gStagePart, tDst);
+        }
         return;
     }
     // FP16 路径：保留标量 staging（HIF8 是主优化目标）。
