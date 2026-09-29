@@ -510,20 +510,6 @@ struct QsmlaV2PassEnv {
 //      原位更新），出口段直接归一化写 GM——消除每块每 dd 的
 //      TLOAD/TSTORE GM 往返（原最大单项 TLSU 流量）。
 //   dd 循环因 tile 数组需编译期索引而完全展开（unroll full）。
-template <typename Tiles>
-struct QsmlaV2Resident {
-    // 命名成员 + at()（tile 数组元素做 TROWEXPAND 的 source 时元数据
-    // 异常——gfrun row-expansion 断言；unroll(full) 下 at() 内联为
-    // 编译期成员访问）
-    typename Tiles::tileOCube o0, o1, o2, o3, o4, o5, o6, o7;
-    static constexpr int kNum = 8;
-    static_assert(Tiles::kDb <= kNum, "resident O slots");
-    __attribute__((always_inline)) inline
-    typename Tiles::tileOCube& at(int i) {
-        return i == 0 ? o0 : i == 1 ? o1 : i == 2 ? o2 : i == 3 ? o3
-             : i == 4 ? o4 : i == 5 ? o5 : i == 6 ? o6 : o7;
-    }
-};
 
 // 复位 online-softmax 行状态：m = -inf，l = 0。
 template <typename Env>
@@ -540,10 +526,10 @@ static __attribute__((always_inline)) inline void qsmla_v2_init_row_state(Env& e
     TSTORE(gSumState, tSum);
 }
 
-// work 级：清零 O 累加器（GM pv_scratch）。
-// O 驻留 tile 实验已回退（qsmla-oq-resident 记录）：跨块循环的驻留
-// tile 触发编译器回边保活机制，TROWEXPANDMUL 的 row-expansion 广播源
-// 元数据校验失败（gfrun 断言）——编译器/TileOP gap，见 issue 素材。
+// work 级：清零 O 累加器（GM pv_scratch）。O tile 驻留在零标量块循环
+// 下仍触发 TMOV 断言（第二轮实验，fa_gmma_dynamic 同形态）——src 为
+// Shared tile 的非法 Local TMOV 反复出现，疑编译器 Shared pool 回边
+// 管理 gap，issue 素材；本分支收敛为 staging tile 化 + mask 查表。
 template <typename Env>
 static __attribute__((always_inline)) inline void qsmla_v2_reset_o_state(Env& env)
 {
@@ -611,7 +597,7 @@ static __attribute__((always_inline)) inline void qsmla_v2_visit_source_single(
     Env& env, QIter q_iter,
     KVType* source, const float* selected,
     int range_begin, int logical_count, int allow_direct,
-    float kv_descale)
+    float kv_descale, float* tail_mask)
 {
     using Tiles = typename Env::Tiles;
     constexpr int kTk = Tiles::kTk;
@@ -638,8 +624,7 @@ static __attribute__((always_inline)) inline void qsmla_v2_visit_source_single(
         TLOAD(tMax, gMaxState);
         TLOAD(tSum, gSumState);
 
-        // ① score = Q·Kᵀ（只算一次；Q 保持 per-block Shared TLOAD——
-        // SharedTile 跨 staging 标量段会触发非法 Local TMOV 保活）
+        // ① score = Q·Kᵀ（Q 暂保持 per-block Shared TLOAD）
         qsmla_v2_compute_score_tile(env, q_iter, gIterK);
 
         // ② online softmax 更新 + 立即量化 P（用运行时 max，不除 l）
@@ -652,17 +637,12 @@ static __attribute__((always_inline)) inline void qsmla_v2_visit_source_single(
         // 负列 iota 从 kernel 级预构造的 neg_iota_buf 载入（[kPeRows,kTk]
         // 每行 -(0..kTk-1)）——TCOLEXPAND 广播源与 CubeM16 dst 的 layout
         // 不匹配，故走 GM 中转 + TEXPANDS 标量 + TMAXS 钳零。
-        // mask：GM 路径（原实现）。mask 全 tile 化实验回退——
-        // TLOAD(neg_iota)+算术链（TADDS/TMINS、TADD+TMIN 多种组合）
-        // 数值全部错乱（30505/32768），而 TLOAD(zero)+TADD 正常、
-        // staging tile 化正常——错误锁定在"非零内容的 mask tile 算术"
-        // （疑 TLOAD RowMajor->CubeM16 非零数据 + 后续算术的交互，
-        // 编译器/TileOP gap，issue 素材）。尾块标量 mask 构造保留
-        // （每 work 仅尾块触发）。
-        float* maskSrc = env.mask_buf;
-        if (kv.valid_rows == kTk) {
-            maskSrc = env.zero_mask_buf;
-        }
+        // mask 查表（fa_gmma_dynamic 前置条件：块循环内零标量段）：
+        // work 级预构造本 source 的尾块 mask 表（valid = count % kTk），
+        // 块内仅标量指针选择——满块选 zero、尾块选预构造表，无循环无
+        // 标量 store。（mask tile 算术化仍有 gap ③，见分支记录。）
+        float* maskSrc = kv.valid_rows == kTk ? env.zero_mask_buf
+                                              : tail_mask;
         typename Tiles::itMask gIterMask(maskSrc);
         QSMLA_TW_DECL_M
         auto gMask = gIterMask(0, 0);
@@ -918,20 +898,52 @@ void quant_sparse_flash_mla_tadd_4pe_bsnd_pto_v2(
             }
         }
 
-        // 方案 7 单趟（staging/mask 全 tile 化版）：初始化状态 →
-        // 两个源各跑一遍 single visitor → 最终归一化出口。
-        // O/Q 跨块驻留实验已回退（编译器回边保活 gap，详见分支记录）。
+        // ★ Q/O 驻留（fa_gmma_dynamic 形态，2026-09-29 第二轮）：
+        // Q 每 work 一次 Shared TLOAD ×kDb（原每块 ×kDb）；O 驻留 tile
+        // 跨块原位累加（原每块每 dd GM TLOAD/TSTORE 往返）。前置条件
+        // （块循环内零标量段）已由 staging tile 化 + 尾块 mask 查表达成。
+        // 尾块 mask 表（work 级标量构造，块内零标量）：每个 source
+        // 预构造自己尾块 valid 的 [kPeRows,kTk] 表；满块走 zero。
+        constexpr int kMaskElements2 = kPeRows * Tiles::kTk;
+        float ori_tail_mask_buf[kMaskElements2];
+        float cmp_tail_mask_buf[kMaskElements2];
+        float* ori_tail_mask = env.zero_mask_buf;
+        float* cmp_tail_mask = env.zero_mask_buf;
+        const int ori_tail_valid = ori_span.count % Tiles::kTk;
+        if (ori_tail_valid != 0) {
+            for (int row = 0; row < kPeRows; ++row) {
+                for (int column = 0; column < Tiles::kTk; ++column) {
+                    ori_tail_mask_buf[row * Tiles::kTk + column] =
+                        column < ori_tail_valid ? 0.0f : -1.0e30f;
+                }
+            }
+            ori_tail_mask = ori_tail_mask_buf;
+        }
+        if constexpr (ModeConfig::HasCmp) {
+            const int cmp_tail_valid = cmp_count % Tiles::kTk;
+            if (cmp_tail_valid != 0) {
+                for (int row = 0; row < kPeRows; ++row) {
+                    for (int column = 0; column < Tiles::kTk; ++column) {
+                        cmp_tail_mask_buf[row * Tiles::kTk + column] =
+                            column < cmp_tail_valid ? 0.0f : -1.0e30f;
+                    }
+                }
+                cmp_tail_mask = cmp_tail_mask_buf;
+            }
+        }
         qsmla_v2_init_row_state(env);
         qsmla_v2_reset_o_state(env);
         qsmla_v2_visit_source_single(
             env, q_iter, work_ori,
             ModeConfig::HasIndexedOri ? ori_selected_f32 : nullptr,
-            ori_span.begin, ori_span.count, true, ori_kv_descale);
+            ori_span.begin, ori_span.count, true, ori_kv_descale,
+            ori_tail_mask);
         if constexpr (ModeConfig::HasCmp) {
             qsmla_v2_visit_source_single(
                 env, q_iter, work_cmp,
                 ModeConfig::HasIndexedCmp ? cmp_selected_f32 : nullptr,
-                0, cmp_count, false, cmp_kv_descale);
+                0, cmp_count, false, cmp_kv_descale,
+                cmp_tail_mask);
         }
         qsmla_v2_store_output_single(env, out_ptr, work_out_offset);
     }
