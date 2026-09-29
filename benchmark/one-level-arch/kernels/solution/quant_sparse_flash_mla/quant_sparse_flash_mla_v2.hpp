@@ -106,15 +106,19 @@ struct QsmlaV2Tiles {
     // 物理形状仍为编译期 [kPeRows, kTk] 的 M32 CELL 列阵（存储行高恒为
     // 32，128B/CELL），但有效区域在运行时设定。动态维度的 B.DIM 使用
     // 寄存器形式（"B.DIM %[reg], 0"）。
-    // Step C/D（2026-09-23，模式门控）：优化模式（csa/swa/hca/
-    // ori_cmp）tileW 族静态化（TCVT CUBE_M16/M32 要求 src/dst valid
-    // shape 一致）+ O/PV 半驻留载体（Vec location + CubeM32 布局静态
-    // valid）。ORI_SPARSE 模式 gfsim 在静态化 tileW 下死锁（TMA
-    // l1d_refill_unmatched，gfrun 正常——时序模型缺口），整体保持
-    // 原始 DYNAMIC 形态。
+    // Step C/D（2026-09-23，模式门控）：优化模式 tileW 族静态化
+    // （TCVT CUBE_M16/M32 要求 src/dst valid shape 一致）+ O/PV 半驻留
+    // 载体（Vec location + Cube 布局静态 valid）。
+    // ORI_SPARSE 2026-09-29 并入静态分支：单趟 visitor 的 PV 循环
+    // 依赖静态 tileOCube/tilePLocal，DYNAMIC 分支无此类型（方案 7
+    // 引入的编译回归）。历史上的 DYNAMIC 保留原因是 gfsim 静态化
+    // tileW 下 TMA l1d_refill_unmatched 死锁（gfrun 正常，时序模型
+    // 缺口）——当前上游 gfsim 对 ori_sparse 本就死锁，该门控已无
+    // 保护对象。
 #if defined(QSMLA_USE_CSA_TADD_4PE) || \
     defined(QSMLA_USE_TADD_4PE) || \
     defined(QSMLA_USE_HCA_TADD_4PE) || \
+    defined(QSMLA_USE_ORI_SPARSE_TADD_4PE) || \
     defined(QSMLA_USE_ORI_CMP_SPARSE_TADD_4PE)
     using tileW = VecTileM16<float, kPeRows, kTk>;
     using tileMask = tileW;
