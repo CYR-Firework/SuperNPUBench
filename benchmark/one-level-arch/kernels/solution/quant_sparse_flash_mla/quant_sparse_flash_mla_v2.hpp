@@ -210,6 +210,13 @@ struct QsmlaV2Tiles {
     using tileGatherDst = Tile<Location::Vec, kvdtype, kTk, kGatherTile>;
     using gmGatherIota = global_tensor<float, RowMajor<1, kGatherTile>>;
     using gmGatherRow = global_tensor<float, RowMajor<kTk, 1>>;
+    // OQ 驻留配套：staging 全 tile 化（2026-09-29）——selected 行首
+    // int32 tile 直载 + 行号 iota [kTk,1]（复用 gather_iota_buf 前 kTk
+    // 个 0..kTk-1）。块循环内标量迭代归零，驻留 tile 不再触发
+    // Local TMOV 保活。
+    using tileSelRow = Tile<Location::Vec, int32_t, kTk, 1>;
+    using gmSelRow = global_tensor<int32_t, RowMajor<kTk, 1>>;
+    using gmRowIota = global_tensor<float, RowMajor<kTk, 1>>;
     // staging 落盘：按 [kTk, kGatherTile] 分片的迭代器（gmGatherKV 的
     // 列分块，片 p 即 (0, p)——与 itK 的 (0, dd) 迭代同构）。
     using itGatherStage = global_iterator<gmGatherKV, tileGatherDst>;
@@ -234,23 +241,46 @@ struct QsmlaV2KVBlock {
 // → P=0 → 对 l 与 PV 均无贡献），数值逐位等价。----
 template <typename Env, typename KVType, int kTk, int kD>
 static __attribute__((always_inline)) inline void qsmla_v2_stage_source_tile(
-    Env& env, KVType* kv_tile_buf, KVType* source, const int* selected,
+    Env& env, KVType* kv_tile_buf, KVType* source, const float* selected,
     int range_begin, int logical_begin, int valid_rows)
 {
     if constexpr (std::is_same_v<KVType, __hif8>) {
-        // ---- 方案 3：MGATHER 引擎化（HIF8 路径）----
-        // 标量只写行首元素下标（≤kTk 次，非 kTk*kD/4 次 word 拷贝）；
-        // 布局/搬运全部交给 tile 链。尾块行首填 0（gather 到池首行，
-        // 无效行由软件 mask 压制，数值等价）。
+        // ---- 方案 3 + OQ 驻留配套：MGATHER 引擎化，staging 全 tile 化 ----
+        // 行首 tile 直接构造（无标量循环）：
+        //   indexed  : TLOAD(selected[kTk,1] int32) → TCVT float → ×kD。
+        //              尾块越界行读到 padding（collect 残留/0，均为合法
+        //              索引或池首），垃圾 score 由软件 mask 压制。
+        //   连续尾块: (base+row)×kD，TMINS clamp 到最后有效行首（防 GM
+        //              越界；重复行垃圾同样被 mask 压制）。
         using Tiles = typename Env::Tiles;
-        for (int row = 0; row < kTk; ++row) {
-            env.gather_row_buf[row] = row < valid_rows
-                ? static_cast<float>(selected[logical_begin + row] * kD)
-                : 0.0f;
+        // 行首 tile 经 gather_row_buf GM 中转落成原 TLOAD 形态——
+        // TROWEXPANDADD 的 one-column broadcast 源校验（physicalCol
+        // 元数据）只接受 GM 加载形态，TCVT/TMULS 的算术产物不满足。
+        // 中转不在标量循环内（无 TMOV 保活），128B 小往返。
+        typename Tiles::tileGatherRow tRowHead;
+        if (selected != nullptr) {
+            // selected 的 float 副本（work 级标量转换，块循环外）——
+            // TCVT 的 int32->float 路径疑似位重解释，索引错乱。
+            typename Tiles::gmGatherRow gSel(
+                selected + logical_begin);
+            TLOAD(tRowHead, gSel);
+            TMULS(tRowHead, tRowHead, static_cast<float>(kD));
+        } else {
+            typename Tiles::gmRowIota gRowIota(env.gather_iota_buf);
+            typename Tiles::tileGatherRow tRowIota;
+            TLOAD(tRowIota, gRowIota);
+            TMULS(tRowIota, tRowIota, static_cast<float>(kD));
+            TEXPANDS(tRowHead, static_cast<float>(
+                          (range_begin + logical_begin) * kD));
+            TADD(tRowHead, tRowIota, tRowHead);
+            TMINS(tRowHead, tRowHead, static_cast<float>(
+                          (range_begin + logical_begin + valid_rows - 1)
+                          * kD));
         }
-        typename Tiles::gmGatherRow gRow(env.gather_row_buf);
+        typename Tiles::gmGatherRow gRowW(env.gather_row_buf);
+        TSTORE(gRowW, tRowHead);
         typename Tiles::tileGatherRow tRow;
-        TLOAD(tRow, gRow);
+        TLOAD(tRow, gRowW);
         typename Tiles::gmGatherKV gPool(source);
         typename Tiles::itGatherStage itStage(kv_tile_buf);
         // 片间依赖链（S32 TADD 读上一片的 index tile）：强制 16 片
@@ -331,7 +361,7 @@ static __attribute__((always_inline)) inline void qsmla_v2_build_source_mask(
 template <typename Env, typename KVType, int kTk, int kD, int kPeRows>
 static __attribute__((always_inline)) inline QsmlaV2KVBlock<KVType> qsmla_v2_prepare_kv_block(
     Env& env, KVType* kv_tile_buf, float* mask_buf,
-    KVType* source, const int* selected,
+    KVType* source, const float* selected,
     int range_begin, int logical_begin, int logical_count,
     int allow_direct)
 {
@@ -463,11 +493,36 @@ struct QsmlaV2PassEnv {
     int pe_id;
 
     // PE 私有标量 scratch buffer。
-    float* mask_buf;
+    float* neg_iota_buf;  // [退役保留] 负列 iota（mask tile 化 gap 复现用）
+    float* mask_buf;      // 尾块 mask 构造目标（标量，仅尾块写）
     float* zero_mask_buf;  // 满块 mask 源（恒全 0，kernel 级一次清零）
     float* gather_iota_buf;  // iota [kD] FP32（kernel 级一次构造）
     float* gather_row_buf;   // 行首元素下标 [kTk] FP32（每块 ≤kTk 次标量写）
     kvdtype* kv_tile_buf;
+};
+
+// 方案 OQ 驻留（2026-09-29，qsmla-oq-resident 分支）：
+//   Q：每 work 一次 Shared TLOAD ×kDb，ori/cmp 双 visitor 跨块复用
+//      （原实现每块 ×kDb 次 Shared TLOAD）——对标原算子 l1QTensor
+//      三缓冲跨 s2 块驻留 + work 切换预取的 L1 驻留策略。
+//   O：TEXPANDS 清零后跨块驻留 tile，PV 循环原位 TROWEXPANDMUL/TADD
+//      （对标原算子 AIV stage2OutBuf 的 UB 驻留 + FlashUpdateNew
+//      原位更新），出口段直接归一化写 GM——消除每块每 dd 的
+//      TLOAD/TSTORE GM 往返（原最大单项 TLSU 流量）。
+//   dd 循环因 tile 数组需编译期索引而完全展开（unroll full）。
+template <typename Tiles>
+struct QsmlaV2Resident {
+    // 命名成员 + at()（tile 数组元素做 TROWEXPAND 的 source 时元数据
+    // 异常——gfrun row-expansion 断言；unroll(full) 下 at() 内联为
+    // 编译期成员访问）
+    typename Tiles::tileOCube o0, o1, o2, o3, o4, o5, o6, o7;
+    static constexpr int kNum = 8;
+    static_assert(Tiles::kDb <= kNum, "resident O slots");
+    __attribute__((always_inline)) inline
+    typename Tiles::tileOCube& at(int i) {
+        return i == 0 ? o0 : i == 1 ? o1 : i == 2 ? o2 : i == 3 ? o3
+             : i == 4 ? o4 : i == 5 ? o5 : i == 6 ? o6 : o7;
+    }
 };
 
 // 复位 online-softmax 行状态：m = -inf，l = 0。
@@ -485,7 +540,10 @@ static __attribute__((always_inline)) inline void qsmla_v2_init_row_state(Env& e
     TSTORE(gSumState, tSum);
 }
 
-// pass2 之前：清零 PE 私有 O 累加器。
+// work 级：清零 O 累加器（GM pv_scratch）。
+// O 驻留 tile 实验已回退（qsmla-oq-resident 记录）：跨块循环的驻留
+// tile 触发编译器回边保活机制，TROWEXPANDMUL 的 row-expansion 广播源
+// 元数据校验失败（gfrun 断言）——编译器/TileOP gap，见 issue 素材。
 template <typename Env>
 static __attribute__((always_inline)) inline void qsmla_v2_reset_o_state(Env& env)
 {
@@ -551,7 +609,7 @@ static __attribute__((always_inline)) inline void qsmla_v2_compute_score_tile(
 template <typename Env, typename QIter, typename KVType>
 static __attribute__((always_inline)) inline void qsmla_v2_visit_source_single(
     Env& env, QIter q_iter,
-    KVType* source, const int* selected,
+    KVType* source, const float* selected,
     int range_begin, int logical_count, int allow_direct,
     float kv_descale)
 {
@@ -580,22 +638,32 @@ static __attribute__((always_inline)) inline void qsmla_v2_visit_source_single(
         TLOAD(tMax, gMaxState);
         TLOAD(tSum, gSumState);
 
-        // ① score = Q·Kᵀ（只算一次——从两趟的 2 次降为 1 次）
+        // ① score = Q·Kᵀ（只算一次；Q 保持 per-block Shared TLOAD——
+        // SharedTile 跨 staging 标量段会触发非法 Local TMOV 保活）
         qsmla_v2_compute_score_tile(env, q_iter, gIterK);
 
         // ② online softmax 更新 + 立即量化 P（用运行时 max，不除 l）
         QSMLA_TW_DECL_W
         TLOAD(tW, env.gScore);
         TMULS(tW, tW, score_scale);
-#if defined(QSMLA_USE_TADD_4PE)
-        typename Tiles::itMask gIterMask(env.mask_buf);
-#else
+        // mask 全 tile 构造（OQ 驻留配套，2026-09-29）：
+        // mask = -min(0, valid - col) * 1e30 -> 有效列精确 0、无效列
+        // <= -1e30。满块（valid==kTk）时全 0——同一公式无分支。
+        // 负列 iota 从 kernel 级预构造的 neg_iota_buf 载入（[kPeRows,kTk]
+        // 每行 -(0..kTk-1)）——TCOLEXPAND 广播源与 CubeM16 dst 的 layout
+        // 不匹配，故走 GM 中转 + TEXPANDS 标量 + TMAXS 钳零。
+        // mask：GM 路径（原实现）。mask 全 tile 化实验回退——
+        // TLOAD(neg_iota)+算术链（TADDS/TMINS、TADD+TMIN 多种组合）
+        // 数值全部错乱（30505/32768），而 TLOAD(zero)+TADD 正常、
+        // staging tile 化正常——错误锁定在"非零内容的 mask tile 算术"
+        // （疑 TLOAD RowMajor->CubeM16 非零数据 + 后续算术的交互，
+        // 编译器/TileOP gap，issue 素材）。尾块标量 mask 构造保留
+        // （每 work 仅尾块触发）。
         float* maskSrc = env.mask_buf;
         if (kv.valid_rows == kTk) {
             maskSrc = env.zero_mask_buf;
         }
         typename Tiles::itMask gIterMask(maskSrc);
-#endif
         QSMLA_TW_DECL_M
         auto gMask = gIterMask(0, 0);
         TLOAD(tMask, gMask);
@@ -750,10 +818,17 @@ void quant_sparse_flash_mla_tadd_4pe_bsnd_pto_v2(
     const int pe_id = static_cast<int>(get_thread_idx());
 
     constexpr int kMaskElements = kPeRows * Tiles::kTk;
+    float neg_iota_buf[kMaskElements];  // 每行 -(0..kTk-1)
     float mask_buf[kMaskElements];
     float zero_mask_buf[kMaskElements];
     for (int i = 0; i < kMaskElements; ++i) {
         zero_mask_buf[i] = 0.0f;
+    }
+    for (int row = 0; row < kPeRows; ++row) {
+        for (int column = 0; column < Tiles::kTk; ++column) {
+            neg_iota_buf[row * Tiles::kTk + column] =
+                static_cast<float>(-column);
+        }
     }
     // 方案 3：gather 辅助数组（iota 一次构造；行首下标每块重写）。
     float gather_iota_buf[Config::D];
@@ -762,6 +837,12 @@ void quant_sparse_flash_mla_tadd_4pe_bsnd_pto_v2(
     }
     float gather_row_buf[Tiles::kTk];
     kvdtype kv_tile_buf[Tiles::kTk * Config::D];
+    // OQ 驻留配套：selected 的 float 副本 + kTk 零 padding——
+    // ① 块内 staging 全 tile 化（TLOAD float 行首 + TMULS）；
+    // ② 尾块越界行读到 padding 0（gather 池首行，软件 mask 压制）；
+    // ③ 标量转换在 work 级（decode 后），块循环内零标量写。
+    float ori_selected_f32[kOriIndexStorage + Tiles::kTk];
+    float cmp_selected_f32[kCmpIndexStorage + Tiles::kTk];
     int ori_selected[kOriIndexStorage];
     int cmp_selected[kCmpIndexStorage];
 
@@ -783,6 +864,7 @@ void quant_sparse_flash_mla_tadd_4pe_bsnd_pto_v2(
         softmax_scale,
         q_descale,
         pe_id,
+        neg_iota_buf,
         mask_buf,
         zero_mask_buf,
         gather_iota_buf,
@@ -812,19 +894,43 @@ void quant_sparse_flash_mla_tadd_4pe_bsnd_pto_v2(
         const int cmp_count = qsmla_v2_decode_cmp_span<ModeConfig, Config>(
             work, cmp_ratio,
             cmp_topk_length, cmp_sparse_indices, cmp_selected);
+        // selected int -> float 副本 + padding（work 级，块循环外）
+        if constexpr (ModeConfig::HasIndexedOri) {
+            for (int i = 0; i < ori_span.count; ++i) {
+                ori_selected_f32[i] =
+                    static_cast<float>(ori_selected[i]);
+            }
+        }
+        if constexpr (ModeConfig::HasCmp) {
+            for (int i = 0; i < cmp_count; ++i) {
+                cmp_selected_f32[i] =
+                    static_cast<float>(cmp_selected[i]);
+            }
+            for (int i = cmp_count;
+                 i < kCmpIndexStorage + Tiles::kTk; ++i) {
+                cmp_selected_f32[i] = 0.0f;
+            }
+        }
+        if constexpr (ModeConfig::HasIndexedOri) {
+            for (int i = ori_span.count;
+                 i < kOriIndexStorage + Tiles::kTk; ++i) {
+                ori_selected_f32[i] = 0.0f;
+            }
+        }
 
-        // 方案 7 单趟：初始化状态 → 两个源各跑一遍 single visitor →
-        // 最终归一化出口（QKᵀ 从 2 次降为 1 次/块/源）。
+        // 方案 7 单趟（staging/mask 全 tile 化版）：初始化状态 →
+        // 两个源各跑一遍 single visitor → 最终归一化出口。
+        // O/Q 跨块驻留实验已回退（编译器回边保活 gap，详见分支记录）。
         qsmla_v2_init_row_state(env);
         qsmla_v2_reset_o_state(env);
         qsmla_v2_visit_source_single(
             env, q_iter, work_ori,
-            ModeConfig::HasIndexedOri ? ori_selected : nullptr,
+            ModeConfig::HasIndexedOri ? ori_selected_f32 : nullptr,
             ori_span.begin, ori_span.count, true, ori_kv_descale);
         if constexpr (ModeConfig::HasCmp) {
             qsmla_v2_visit_source_single(
                 env, q_iter, work_cmp,
-                ModeConfig::HasIndexedCmp ? cmp_selected : nullptr,
+                ModeConfig::HasIndexedCmp ? cmp_selected_f32 : nullptr,
                 0, cmp_count, false, cmp_kv_descale);
         }
         qsmla_v2_store_output_single(env, out_ptr, work_out_offset);
