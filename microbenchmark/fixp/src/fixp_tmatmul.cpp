@@ -108,13 +108,13 @@ using group_max_tile_t =
 // operands below are ordinary data tiles. 1-row tiles are still padded to
 // >=512 B physical per the tile-register contract, like par_tile_t above.)
 
-// Bias tile (TMATMUL_BIAS / TGEMV_BIAS): valid 1 x N float, padded to >=512 B.
+// PTO-CUBE-AUX-CELLREG-001: matrix bias is also a logical [1, N]
+// CUBE_N8 CellReg operand.  Four-byte element types use physical K4 x N8.
 template <int N>
-using bias_tile_t = Tile<Location::Vec, float, 4, N, BLayout::RowMajor, 1, N>;
+using bias_tile_t = CubeTileN8<float, 4, N, 1, N>;
 
 template <typename T, int N>
-using typed_bias_tile_t =
-    Tile<Location::Vec, T, 4, N, BLayout::RowMajor, 1, N>;
+using typed_bias_tile_t = CubeTileN8<T, 4, N, 1, N>;
 
 // FP32 accumulator C tile for ACC ops. It must match D's CUBE_M layout.
 template <int M, int N>
