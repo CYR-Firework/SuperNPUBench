@@ -85,10 +85,11 @@ constexpr uint64_t mk_desc(uint32_t fp19_scale, uint64_t offset,
   return d;
 }
 
-// Vector quant / PReLU parameter Tile: physical 2 x N uint64 (512 B),
-// valid 1 x N.
+// PTO-CUBE-AUX-CELLREG-001: vector quant / PReLU parameters are logical
+// [1, N] U64 values carried by the only legal U64 CellReg geometry,
+// CUBE_N8 K2 x N8.  The physical 2 x N storage is 512 B for N=32.
 template <int N>
-using par_tile_t = Tile<Location::Vec, uint64_t, 2, N, BLayout::RowMajor, 1, N>;
+using par_tile_t = CubeTileN8<uint64_t, 2, N, 1, N>;
 
 // Matrix post-process reduction operands must use the same primary CUBE_M
 // layout as D.  These microbenchmarks use a CUBE_M32 destination.
