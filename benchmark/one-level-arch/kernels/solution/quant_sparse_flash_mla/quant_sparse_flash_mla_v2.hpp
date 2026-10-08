@@ -511,6 +511,26 @@ struct QsmlaV2PassEnv {
 //      TLOAD/TSTORE GM 往返（原最大单项 TLSU 流量）。
 //   dd 循环因 tile 数组需编译期索引而完全展开（unroll full）。
 
+// OQ 驻留（第五轮，2026-10-04：递增法找 TMOV 阈值）。
+// kResidentO 个 O tile 驻留，其余走 GM。
+template <typename Tiles>
+struct QsmlaV2Resident {
+    static constexpr int kNum = 8;
+    typename Tiles::tileOCube o0, o1, o2, o3, o4, o5, o6, o7;
+    typename Tiles::tileQLocal q0, q1;
+    __attribute__((always_inline)) inline
+    typename Tiles::tileOCube& at_o(int i) {
+        return i == 0 ? o0 : i == 1 ? o1 : i == 2 ? o2 : i == 3 ? o3
+             : i == 4 ? o4 : i == 5 ? o5 : i == 6 ? o6 : o7;
+    }
+    __attribute__((always_inline)) inline
+    typename Tiles::tileQLocal& at_q(int i) {
+        return i == 0 ? q0 : q1;
+    }
+};
+constexpr int kResidentO = 2;
+constexpr int kResidentQ = 2;
+
 // 复位 online-softmax 行状态：m = -inf，l = 0。
 template <typename Env>
 static __attribute__((always_inline)) inline void qsmla_v2_init_row_state(Env& env)
@@ -530,15 +550,20 @@ static __attribute__((always_inline)) inline void qsmla_v2_init_row_state(Env& e
 // 下仍触发 TMOV 断言（第二轮实验，fa_gmma_dynamic 同形态）——src 为
 // Shared tile 的非法 Local TMOV 反复出现，疑编译器 Shared pool 回边
 // 管理 gap，issue 素材；本分支收敛为 staging tile 化 + mask 查表。
-template <typename Env>
-static __attribute__((always_inline)) inline void qsmla_v2_reset_o_state(Env& env)
+template <typename Env, typename Resident>
+static __attribute__((always_inline)) inline void qsmla_v2_reset_o_state(
+    Env& env, Resident& res)
 {
     using Tiles = typename Env::Tiles;
     constexpr int kPeRows = Tiles::kPeRows;
     constexpr int kTd = Tiles::kTd;
     constexpr int kDb = Tiles::kDb;
+#pragma clang loop unroll(full)
+    for (int rr = 0; rr < kResidentO; ++rr) {
+        TEXPANDS(res.at_o(rr), 0.0f);
+    }
 #pragma clang loop unroll(disable)
-    for (int out_dd = 0; out_dd < kDb; ++out_dd) {
+    for (int out_dd = kResidentO; out_dd < kDb; ++out_dd) {
         typename Tiles::tileO tZeroO(kPeRows, kTd);
         TEXPANDS(tZeroO, 0.0f);
         auto gOState = env.gIterPV(0, out_dd);
@@ -554,9 +579,9 @@ static __attribute__((always_inline)) inline void qsmla_v2_reset_o_state(Env& en
 // 把 kDb 个 D 切片累加进一个 M32 Cube score tile，再落到 PE 的 score
 // scratch。pass1 与 pass2 共用（两趟方案会重算同一条 QK^T 链）。
 // =============================================================================
-template <typename Env, typename QIter, typename KIter>
+template <typename Env, typename Resident, typename QIter, typename KIter>
 static __attribute__((always_inline)) inline void qsmla_v2_compute_score_tile(
-    Env& env, QIter q_iter, KIter k_iter)
+    Env& env, Resident& res, QIter q_iter, KIter k_iter)
 {
     using Tiles = typename Env::Tiles;
     constexpr int kDb = Tiles::kDb;
@@ -564,18 +589,29 @@ static __attribute__((always_inline)) inline void qsmla_v2_compute_score_tile(
     typename Tiles::tileScoreCube tScoreCube;
 #pragma clang loop unroll(full)
     for (int dd = 0; dd < kDb; ++dd) {
-        typename Tiles::tileQLocal tQLocal;
         typename Tiles::tileKShared tKShared;
-        auto gQ = q_iter(0, dd);
         auto gK = k_iter(0, dd);
-        TLOAD<typename Tiles::tileQSharedMatrix, 1>(tQLocal, gQ);
         TLOAD<typename Tiles::tileKMatrix, 1>(tKShared, gK);
-        if (dd == 0) {
-            TMATMUL(tScoreCube, tQLocal, tKShared,
-                    fixp::keep_acc());
-        } else {
-            TMATMUL_ACC(tScoreCube, tScoreCube, tQLocal, tKShared,
+        if (dd < kResidentQ) {
+            // 驻留 Q tile
+            if (dd == 0) {
+                TMATMUL(tScoreCube, res.at_q(dd), tKShared,
                         fixp::keep_acc());
+            } else {
+                TMATMUL_ACC(tScoreCube, tScoreCube, res.at_q(dd),
+                            tKShared, fixp::keep_acc());
+            }
+        } else {
+            typename Tiles::tileQLocal tQLocal;
+            auto gQ = q_iter(0, dd);
+            TLOAD<typename Tiles::tileQSharedMatrix, 1>(tQLocal, gQ);
+            if (dd == 0) {
+                TMATMUL(tScoreCube, tQLocal, tKShared,
+                        fixp::keep_acc());
+            } else {
+                TMATMUL_ACC(tScoreCube, tScoreCube, tQLocal, tKShared,
+                            fixp::keep_acc());
+            }
         }
     }
 
@@ -594,7 +630,7 @@ static __attribute__((always_inline)) inline void qsmla_v2_compute_score_tile(
 // =============================================================================
 template <typename Env, typename QIter, typename KVType>
 static __attribute__((always_inline)) inline void qsmla_v2_visit_source_single(
-    Env& env, QIter q_iter,
+    Env& env, QsmlaV2Resident<typename Env::Tiles>& res, QIter q_iter,
     KVType* source, const float* selected,
     int range_begin, int logical_count, int allow_direct,
     float kv_descale, float* tail_mask)
@@ -624,8 +660,8 @@ static __attribute__((always_inline)) inline void qsmla_v2_visit_source_single(
         TLOAD(tMax, gMaxState);
         TLOAD(tSum, gSumState);
 
-        // ① score = Q·Kᵀ（Q 暂保持 per-block Shared TLOAD）
-        qsmla_v2_compute_score_tile(env, q_iter, gIterK);
+        // ① score = Q·Kᵀ（dd<kResidentQ 用驻留 Q，其余 per-block）
+        qsmla_v2_compute_score_tile(env, res, q_iter, gIterK);
 
         // ② online softmax 更新 + 立即量化 P（用运行时 max，不除 l）
         QSMLA_TW_DECL_W
@@ -685,23 +721,35 @@ static __attribute__((always_inline)) inline void qsmla_v2_visit_source_single(
         typename Tiles::tilePLocal tPLocal;
         TCVT(tPLocal, tW);
 
-        // ③ PV 累加 + O 重缩放（dd 循环 ×8）
-#pragma clang loop unroll(disable)
+        // ③ PV 累加 + O 重缩放（dd ×8；试验 C：dd==0 驻留 res.o0，
+        // 其余 GM——unroll(full) 下编译期分支）
+#pragma clang loop unroll(full)
         for (int out_dd = 0; out_dd < kDb; ++out_dd) {
-            auto gOState = env.gIterPV(0, out_dd);
-            typename Tiles::tileOCube tO;
-            TLOAD(tO, gOState);
-            // ★ 方案 7：O[i][j] *= expFactor[i]（行广播乘——O 重缩放）
-            TROWEXPANDMUL(tO, tO, tScale);
-            typename Tiles::tileVShared tVShared;
-            auto gV = gIterV(0, out_dd);
-            TLOAD<typename Tiles::tileVMatrix, 1>(tVShared, gV);
-            typename Tiles::tileOCube tPV;
-            TMATMUL(tPV, tPLocal, tVShared,
-                    fixp::convert<FixpPreQuantMode::None>().transpose_b());
-            TMULS(tPV, tPV, kv_descale);
-            TADD(tO, tO, tPV);
-            TSTORE(gOState, tO);
+            if (out_dd < kResidentO) {
+                TROWEXPANDMUL(res.at_o(out_dd), res.at_o(out_dd), tScale);
+                typename Tiles::tileVShared tVShared;
+                auto gV = gIterV(0, out_dd);
+                TLOAD<typename Tiles::tileVMatrix, 1>(tVShared, gV);
+                typename Tiles::tileOCube tPV;
+                TMATMUL(tPV, tPLocal, tVShared,
+                        fixp::convert<FixpPreQuantMode::None>().transpose_b());
+                TMULS(tPV, tPV, kv_descale);
+                TADD(res.at_o(out_dd), res.at_o(out_dd), tPV);
+            } else {
+                auto gOState = env.gIterPV(0, out_dd);
+                typename Tiles::tileOCube tO;
+                TLOAD(tO, gOState);
+                TROWEXPANDMUL(tO, tO, tScale);
+                typename Tiles::tileVShared tVShared;
+                auto gV = gIterV(0, out_dd);
+                TLOAD<typename Tiles::tileVMatrix, 1>(tVShared, gV);
+                typename Tiles::tileOCube tPV;
+                TMATMUL(tPV, tPLocal, tVShared,
+                        fixp::convert<FixpPreQuantMode::None>().transpose_b());
+                TMULS(tPV, tPV, kv_descale);
+                TADD(tO, tO, tPV);
+                TSTORE(gOState, tO);
+            }
         }
     }
 }
@@ -711,7 +759,7 @@ static __attribute__((always_inline)) inline void qsmla_v2_visit_source_single(
 // =============================================================================
 template <typename Env, typename OutType>
 static __attribute__((always_inline)) inline void qsmla_v2_store_output_single(
-    Env& env, OutType* out_ptr,
+    Env& env, QsmlaV2Resident<typename Env::Tiles>& res, OutType* out_ptr,
     std::size_t work_out_offset)
 {
     using Tiles = typename Env::Tiles;
@@ -726,22 +774,36 @@ static __attribute__((always_inline)) inline void qsmla_v2_store_output_single(
     typename Tiles::tileSum tInvSum;
     TRECIP(tInvSum, tFinalSum);
     TSTORE(gSumState, tInvSum);
-#pragma clang loop unroll(disable)
+#pragma clang loop unroll(full)
     for (int out_dd = 0; out_dd < kDb; ++out_dd) {
-        auto gOState = env.gIterPV(0, out_dd);
-        QSMLA_TFINAL_DECL
-        TLOAD(tFinalO, gOState);
-        // ★ 方案 7：O[i][j] /= l[i]（行广播除——最终归一化）
-        TROWEXPANDMUL(tFinalO, tFinalO, tInvSum);
-        if constexpr (Tiles::kUseHif8Probability) {
-            TMULS(tFinalO, tFinalO,
-                  1.0f / Tiles::kHif8ProbabilityScale);
+        if (out_dd < kResidentO) {
+            // 驻留 O：直接归一化
+            TROWEXPANDMUL(res.at_o(out_dd), res.at_o(out_dd), tInvSum);
+            if constexpr (Tiles::kUseHif8Probability) {
+                TMULS(res.at_o(out_dd), res.at_o(out_dd),
+                      1.0f / Tiles::kHif8ProbabilityScale);
+            }
+            typename Tiles::tileOCastS tOCast0;
+            TCVT(tOCast0, res.at_o(out_dd));
+            typename Tiles::itO gIterO(out_ptr + work_out_offset
+                                       + env.pe_id * kPeRows * kD);
+            auto gO = gIterO(0, out_dd);
+            TSTORE(gO, tOCast0);
+        } else {
+            auto gOState = env.gIterPV(0, out_dd);
+            QSMLA_TFINAL_DECL
+            TLOAD(tFinalO, gOState);
+            TROWEXPANDMUL(tFinalO, tFinalO, tInvSum);
+            if constexpr (Tiles::kUseHif8Probability) {
+                TMULS(tFinalO, tFinalO,
+                      1.0f / Tiles::kHif8ProbabilityScale);
+            }
+            TCVT(tOCast, tFinalO);
+            typename Tiles::itO gIterO(out_ptr + work_out_offset
+                                       + env.pe_id * kPeRows * kD);
+            auto gO = gIterO(0, out_dd);
+            TSTORE(gO, tOCast);
         }
-        TCVT(tOCast, tFinalO);
-        typename Tiles::itO gIterO(out_ptr + work_out_offset
-                                   + env.pe_id * kPeRows * kD);
-        auto gO = gIterO(0, out_dd);
-        TSTORE(gO, tOCast);
     }
 }
 
@@ -931,21 +993,28 @@ void quant_sparse_flash_mla_tadd_4pe_bsnd_pto_v2(
                 cmp_tail_mask = cmp_tail_mask_buf;
             }
         }
+        QsmlaV2Resident<Tiles> res;
+#pragma clang loop unroll(full)
+        for (int dd = 0; dd < kResidentQ; ++dd) {
+            auto gQ = q_iter(0, dd);
+            TLOAD<typename Tiles::tileQSharedMatrix, 1>(
+                res.at_q(dd), gQ);
+        }
         qsmla_v2_init_row_state(env);
-        qsmla_v2_reset_o_state(env);
+        qsmla_v2_reset_o_state(env, res);
         qsmla_v2_visit_source_single(
-            env, q_iter, work_ori,
+            env, res, q_iter, work_ori,
             ModeConfig::HasIndexedOri ? ori_selected_f32 : nullptr,
             ori_span.begin, ori_span.count, true, ori_kv_descale,
             ori_tail_mask);
         if constexpr (ModeConfig::HasCmp) {
             qsmla_v2_visit_source_single(
-                env, q_iter, work_cmp,
+                env, res, q_iter, work_cmp,
                 ModeConfig::HasIndexedCmp ? cmp_selected_f32 : nullptr,
                 0, cmp_count, false, cmp_kv_descale,
                 cmp_tail_mask);
         }
-        qsmla_v2_store_output_single(env, out_ptr, work_out_offset);
+        qsmla_v2_store_output_single(env, res, out_ptr, work_out_offset);
     }
 }
 
