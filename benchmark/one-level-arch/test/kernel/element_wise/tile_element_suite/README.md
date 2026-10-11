@@ -123,6 +123,31 @@ the final bins. Official TileOps surround ordinary marked element expressions;
 six independent memory segments include the previously unobserved gather result.
 The original vec Makefile forwards this case to the same compiler lane.
 
+[`group_count_s32_original.cpp`](group_count_s32_original.cpp) exercises the
+exact `group_count<16,8,32>` branch in the original DeepSeek header. The kernel
+first snapshots all 128 index words with `ElementTile`, clears exactly 32 output
+bins inside the kernel, partitions the snapshot with `TPARTVIEW<32>`, and uses
+an ordinary marked C++ range check plus relaxed atomic increment. Negative and
+out-of-range indices are ignored, matching the original comparison algorithm.
+`TADDS` materializes each typed logical partition before its element CFG; no
+unused diagnostic Tile operation is added after the atomic. The original case
+retains the driver's full 256-element input and 64-element output allocations:
+all used indices are zero, bin zero becomes 128, and every unused extent stays
+unchanged.
+
+The separate `group_count_s32_strong` ELF uses a deterministic seed-one input,
+five invalid indices, two calls on the same output, and a fully overlapping
+`input == output` call. Exact goldens prove that each call resets its own output
+and that the alias call snapshots all 128 indices before clearing the first 32
+words. The signed input's corresponding unsigned representation lets one
+`index < 32` comparison reject both negative and out-of-range indices while
+keeping the Tile index dtype U32 throughout. IR/object checks require U32 B32
+indices, one B64 `TLEA` offset stream, no index dtype conversion,
+one masked atomic site, and no `TCVT` or residual scalar/vector lowering. This
+targets only the integer `16×8, 32-bin` profile. Closure remains pending fresh
+same-ELF model validation and an inventory update; `aux_fi`, FP32, and other
+shapes remain pending.
+
 [`concat_gather_s32_original.cpp`](concat_gather_s32_original.cpp) calls the
 actual concat template with its original 128000-element S32 configuration and
 512-element batches. Sixteen logical parts perform ordinary indexed reads,
@@ -206,10 +231,11 @@ The indexed-gather ELF must contain one ordinary masked `MGATHER` and no
 `MGATHER.ADD`, plus one U32 `TLEA` whose IR contract scales 32-bit element
 indices to byte offsets. Its negative canaries reject a lost execution mask,
 layout, scaling operand, scalar vector-element fallback, or atomic opcode
-substitution. The default command runs twelve ELFs. During focused development,
+substitution. The default command runs seventeen ELFs. During focused development,
 append `--case indexed_gather_tile_element`, `--case generic_predicated_cfg_i32`,
-`--case generic_typed_tile_cfg_i32`, or `--case generic_atomic_cfg_i32` to run
-one case.
+`--case generic_typed_tile_cfg_i32`, `--case generic_atomic_cfg_i32`,
+`--case group_count_s32_original`, or `--case group_count_s32_strong` to run one
+case.
 
 Every ELF runs unchanged on `gfrun` and `gfsim`. Both memory dumps are checked
 against separately generated input, histogram, output, and status goldens plus

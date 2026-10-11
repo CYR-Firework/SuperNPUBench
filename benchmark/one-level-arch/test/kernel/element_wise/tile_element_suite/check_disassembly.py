@@ -627,6 +627,86 @@ def validate_generic_atomic(text: str, ir_text: str | None) -> None:
         raise CheckError("nested atomic CFG lost element/tail/poison predicates")
 
 
+def validate_group_count(text: str, ir_text: str | None) -> None:
+    body = function_body(text, "group_countILi16")
+    lines = instruction_lines(body)
+
+    def sites(pattern: str) -> list[int]:
+        return [index for index, line in enumerate(lines) if re.search(pattern, line)]
+
+    loads = sites(r"\bBSTART\.TLSU\s+TLOAD, U32\b")
+    adds = sites(r"\bBSTART\.TEPL\s+TADDS, U32\b")
+    tleas = sites(r"\bBSTART\.TEPL\s+TLEA, U32\b")
+    atomics = sites(r"\bBSTART\.TLSU\s+MGATHER\.ADD, (S32|U32)\b")
+    if len(loads) != 1 or len(adds) != 1:
+        raise CheckError("group_count lost its snapshot or TileOp bridges")
+    if len(tleas) != 1 or len(atomics) != 1:
+        raise CheckError("group_count needs one B32-to-B64 stream and one atomic site")
+    if not (loads[0] < adds[0] < atomics[0]):
+        raise CheckError("group_count no longer materializes indices before atomics")
+    if not sites(r"\bB\.SUBVIEW\b") or "CUBE_M32" not in body:
+        raise CheckError("group_count lost public TPARTVIEW/M32 transport")
+    atomic_bundle = re.search(
+        r"BSTART\.TLSU\s+MGATHER\.ADD, (?:S32|U32).*?(?:BSTART|$)", body, re.S
+    )
+    if atomic_bundle is None or "ExecMaskPresent" not in atomic_bundle.group(0):
+        raise CheckError("group_count atomic lost its range predicate mask")
+    if "TCVT" in body:
+        raise CheckError("integer-only group_count unexpectedly emitted TCVT")
+
+    if ir_text is None:
+        raise CheckError("group_count requires LLVM IR evidence")
+    ir = ir_function_body(ir_text, "group_countILi16")
+    if re.search(
+        r"atomicrmw|extractelement|insertelement|"
+        r"@llvm\.linx\.experimental\.element\.(region|view)|"
+        r"@llvm\.linx\.experimental\.ew\.tcvt",
+        ir,
+    ):
+        raise CheckError("group_count contains residual scalar/view/TCVT lowering")
+    atomic_calls = re.findall(
+        r"call <32 x i32> "
+        r"@llvm\.linx\.experimental\.ew\.mgather\.add\.masked[^\n]*",
+        ir,
+    )
+    if len(atomic_calls) != 1:
+        raise CheckError("group_count lost its single masked atomic intrinsic")
+    load_position = ir.find("BSTART.TLSU TLOAD")
+    reset = re.search(
+        r"store i32 0, ptr [^\n]+|"
+        r"call void @llvm\.memset[^\n]*i8 0, i64 128,",
+        ir,
+    )
+    atomic_position = ir.find("@llvm.linx.experimental.ew.mgather.add.masked")
+    if (load_position < 0 or reset is None or atomic_position < 0 or
+            not (load_position < reset.start() < atomic_position)):
+        raise CheckError("group_count must snapshot before its in-kernel reset")
+    tlea_calls = re.findall(
+        r"call <32 x i64> @llvm\.linx\.experimental\.ew\.tlea[^\n]*"
+        r"i64 32\)",
+        ir,
+    )
+    if len(tlea_calls) != 1 or not re.search(
+        r"i64 32, i64 1, i64 25, i64 29, <32 x i32>", tlea_calls[0]
+    ):
+        raise CheckError("group_count lost unsigned B32-to-B64 byte indexing")
+    if "<32 x i8>" in ir or "<32 x i16>" in ir:
+        raise CheckError("group_count narrowed its index below B32")
+    bound = re.search(
+        r"(%[\w.]+) = freeze i32 32\s+(%[\w.]+) = zext i32 \1 to i64", ir
+    )
+    compares = re.findall(
+        r"call i64 @llvm\.linx\.experimental\.ew\.tcmps\.gpr[^\n]*", ir
+    )
+    if (bound is None or len(compares) != 1 or not re.search(
+        r"i64 32, i64 1, i64 25, i64 29, <32 x i32> [^,]+, i64 "
+        + re.escape(bound.group(2)) + r", i64 2\)", compares[0]
+    )):
+        raise CheckError("group_count lost its unsigned index < 32 range predicate")
+    if "@llvm.linx.experimental.ew.tbinary" in ir:
+        raise CheckError("group_count introduced an unnecessary index dtype conversion")
+
+
 def validate_original_atomic(text: str, ir_text: str | None) -> None:
     if ir_text is None:
         raise CheckError("original atomic histogram requires LLVM IR evidence")
@@ -690,6 +770,9 @@ def validate_concat_original(text: str, ir_text: str | None) -> None:
 
 
 def validate(text: str, case: str, ir_text: str | None = None) -> None:
+    if case in ("group_count_s32_original", "group_count_s32_strong"):
+        validate_group_count(text, ir_text)
+        return
     if case in ("concat_gather_s32_original", "concat_gather_s32_alias_probe"):
         validate_concat_original(text, ir_text)
         return
@@ -862,6 +945,78 @@ def main() -> int:
                     args.case,
                     re.sub(
                         r"(define[^\n]*generic_atomic_cfg_i32[^\n]*\n)",
+                        r"\1  %bad = atomicrmw add ptr null, i32 1 monotonic\n",
+                        ir_text or "",
+                        count=1,
+                    ),
+                )
+                print(f"{args.case}: disassembly check PASS")
+                return 0
+            if args.case in ("group_count_s32_original", "group_count_s32_strong"):
+                for marker in ("region", "view"):
+                    rejected(
+                        f"residual element {marker} contract",
+                        text,
+                        args.case,
+                        re.sub(
+                            r"(define[^\n]*group_countILi16[^\n]*\n)",
+                            rf"\1  call void @llvm.linx.experimental.element.{marker}()\n",
+                            ir_text or "",
+                            count=1,
+                        ),
+                    )
+                rejected(
+                    "atomic bundle missing execution mask",
+                    re.sub(
+                        r"(BSTART\.TLSU\s+MGATHER\.ADD, (?:S32|U32).*?)(?=BSTART|\Z)",
+                        lambda match: match.group(0).replace(
+                            "ExecMaskPresent", "NoExecMask"
+                        ),
+                        text,
+                        count=1,
+                        flags=re.S,
+                    ),
+                    args.case,
+                    ir_text,
+                )
+                rejected(
+                    "reset before snapshot",
+                    text.replace("TLOAD, U32", "TLOAD_REMOVED, U32", 1),
+                    args.case,
+                    ir_text,
+                )
+                rejected(
+                    "signed byte-index conversion",
+                    text.replace("TLEA, U32", "TLEA, S32", 1),
+                    args.case,
+                    ir_text,
+                )
+                rejected(
+                    "wrong group bound",
+                    text,
+                    args.case,
+                    (ir_text or "").replace("freeze i32 32", "freeze i32 33", 1),
+                )
+                rejected(
+                    "narrow B32-to-B64 result",
+                    text,
+                    args.case,
+                    (ir_text or "").replace(
+                        "call <32 x i64> @llvm.linx.experimental.ew.tlea",
+                        "call <32 x i32> @llvm.linx.experimental.ew.tlea", 1),
+                )
+                rejected(
+                    "integer path emitted TCVT",
+                    text.replace("TADDS, U32", "TCVT, U32", 1),
+                    args.case,
+                    ir_text,
+                )
+                rejected(
+                    "residual scalar atomic",
+                    text,
+                    args.case,
+                    re.sub(
+                        r"(define[^\n]*group_countILi16[^\n]*\n)",
                         r"\1  %bad = atomicrmw add ptr null, i32 1 monotonic\n",
                         ir_text or "",
                         count=1,

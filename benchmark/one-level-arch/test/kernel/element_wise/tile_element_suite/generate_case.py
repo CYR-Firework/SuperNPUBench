@@ -90,12 +90,85 @@ def main() -> int:
         "generic_predicated_cfg_i32", "generic_typed_tile_cfg_i32",
         "generic_atomic_cfg_i32", "elementwise_atomic_histogram", "concat_gather_s32_original",
         "concat_gather_s32_alias_probe",
+        "group_count_s32_original", "group_count_s32_strong",
         "topk_boundaries", "topk_boundaries_0", "topk_boundaries_1",
         "topk_boundaries_2",
     ))
     parser.add_argument("--out", required=True, type=Path)
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
+
+    if args.case in ("group_count_s32_original", "group_count_s32_strong"):
+        input_count = 256
+        used_count = 128
+        output_count = 64
+        bins = 32
+        magic = 0x47435332
+        strong = args.case == "group_count_s32_strong"
+
+        if strong:
+            state = 1
+            input_values = []
+            for element in range(input_count):
+                if element < used_count:
+                    state = (state * 1664525 + 1013904223) & 0xFFFFFFFF
+                    value = (state >> 16) % bins
+                    if element == 0:
+                        value = -1
+                    elif element == 1:
+                        value = 32
+                    elif element == 2:
+                        value = 99
+                    elif element == 63:
+                        value = -7
+                    elif element == 127:
+                        value = 0x7FFFFFFF
+                else:
+                    value = 0x6B6B0000 + element
+                input_values.append(value & 0xFFFFFFFF)
+            counts = [0] * bins
+            for value in input_values[:used_count]:
+                signed = value if value < 0x80000000 else value - 0x100000000
+                if 0 <= signed < bins:
+                    counts[signed] += 1
+            ignored = used_count - sum(counts)
+            output = counts + [0x5A5A6B6B] * (output_count - bins)
+            alias = counts + input_values[bins:]
+            status = [0, 0, 0, 0, 0, used_count, bins, 2,
+                      sum(counts), ignored, sum(counts), magic]
+            arrays = {
+                "group_count_s32_strong_input": ("input_s32.bin", input_values),
+                "group_count_s32_strong_output": ("output_s32.bin", output),
+                "group_count_s32_strong_alias": ("alias_s32.bin", alias),
+                "group_count_s32_strong_status": ("status_u32.bin", status),
+            }
+        else:
+            input_values = [0] * input_count
+            output = [used_count] + [0] * (output_count - 1)
+            status = [0, 0, 0, 0, input_count, used_count, output_count,
+                      bins, 1, used_count, 0, magic]
+            arrays = {
+                "group_count_s32_original_input": ("input_s32.bin", input_values),
+                "group_count_s32_original_output": ("output_s32.bin", output),
+                "group_count_s32_original_status": ("status_u32.bin", status),
+            }
+
+        segments = []
+        for symbol, (filename, values) in arrays.items():
+            write_u32(args.out / filename, values)
+            segments.append({"symbol": symbol, "kind": "exact",
+                             "file": filename})
+        (args.out / "manifest.json").write_text(json.dumps({
+            "case": args.case,
+            "input_count": input_count,
+            "used_count": used_count,
+            "output_count": output_count,
+            "bins": bins,
+            "repeated_calls": 2 if strong else 1,
+            "alias": strong,
+            "segments": segments,
+        }, indent=2) + "\n")
+        return 0
 
     if args.case in ("concat_gather_s32_original", "concat_gather_s32_alias_probe"):
         input_count, rows, columns, tensors = 128000, 64, 2, 1000

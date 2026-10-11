@@ -33,8 +33,45 @@ namespace supernpu::tile_isa {
 
 template <int NumTokens, int NumTopk, int NumGroups, int TileM = 16>
 void group_count(std::int32_t *group_idx, std::int32_t *out) {
-    static_assert(NumTokens > 0 && NumTopk > 0 && NumGroups > 0, "dim must be positive");
-    static_assert(NumTopk % 8 == 0 && NumGroups % 8 == 0, "NumTopk/NumGroups must be multiple of 8");
+  static_assert(NumTokens > 0 && NumTopk > 0 && NumGroups > 0,
+                "dim must be positive");
+  static_assert(NumTopk % 8 == 0 && NumGroups % 8 == 0,
+                "NumTopk/NumGroups must be multiple of 8");
+  if constexpr (NumTokens == 16 && NumTopk == 8 && NumGroups == 32 &&
+                TileM == 16) {
+    using namespace pto;
+    constexpr std::size_t kElements = 128;
+    constexpr std::size_t kPartElements = 32;
+
+    // 必须先把全部 128 个逻辑下标快照到 Local Tile，再清零输出。
+    // 因此 out 与 group_idx 起始地址相同时，统计仍读取调用前的完整输入。
+    // 对应的无符号类型可读取相同的 32-bit 对象表示。负数变为大于等于
+    // 2^31 的字，下面一次 unsigned 比较同时排除负数和越界值。
+    // 下标从加载到 TLEA 都保持 U32，避免额外的 Tile signedness 转换。
+    ElementTile<std::uint32_t, kElements> snapshot;
+    TLOAD(snapshot, reinterpret_cast<const std::uint32_t *>(group_idx),
+          kElements);
+
+    for (std::size_t bin = 0; bin < NumGroups; ++bin)
+      out[bin] = 0;
+
+    auto parts = TPARTVIEW<kPartElements>(snapshot, kElements);
+    for (std::size_t part = 0; part < parts.size(); ++part) {
+      ElementTile<std::uint32_t, kPartElements> indices;
+      auto source = parts.part(part);
+      TADDS(indices, source, std::uint32_t(0));
+      auto &elements = TPARTELEMENT(indices);
+
+      // 普通 C++ 基本块忽略负数和越界 group。不同 element 可无序，
+      // 每个有效 element 只执行一次 relaxed atomic add。
+#pragma pto element for
+      for (unsigned element = 0; element < kPartElements; ++element) {
+        const std::uint32_t index = elements[element];
+        if (index < NumGroups)
+          __atomic_fetch_add(out + index, std::int32_t(1), __ATOMIC_RELAXED);
+      }
+    }
+  } else {
     constexpr int kTM = NumTokens / TileM;
     using namespace pto;
     using gm_idx = global_tensor<std::int32_t, RowMajor<NumTokens, NumTopk>>;
@@ -63,6 +100,7 @@ void group_count(std::int32_t *group_idx, std::int32_t *out) {
     }
     auto gout = out_iter(0, 0);
     TSTORE(gout, grand);
+  }
 }
 
 // aux_fi: group_count 后 TCVT(int→fp32)+TMULS(*N/(T*K))
