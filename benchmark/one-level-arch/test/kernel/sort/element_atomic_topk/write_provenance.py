@@ -156,7 +156,8 @@ def main() -> int:
             "gfsim": [
                 str(args.gfsim),
                 "--pto059-execution-mask-dev", "-s", "core.threadCount=1",
-                "core.stdPeCount=1", "--dump-force", "--dump-memory",
+                "core.stdPeCount=1", "bctrl.assemble_enable=true",
+                "--dump-force", "--dump-memory",
                 f"{args.dump_range}:{args.artifact_dir / 'gfsim.mem'}",
                 "-f", str(args.elf),
             ],

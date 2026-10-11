@@ -64,7 +64,10 @@ selected histogram combines tail and digit predicates through generic CFG mask
 construction. Negative disassembly and IR canaries prove these checks reject
 corrupted instructions. Both gfrun and gfsim must then run as one logical
 thread/PE and match the independently generated input, histogram, Top-K, and
-status and coherence memory segments. UART text is diagnostic only and is not used as the
+status and coherence memory segments. The gfsim profile explicitly enables
+`bctrl.assemble_enable=true`; the retained command provenance records this
+existing feature switch alongside the single-context settings. Queue capacities
+and watchdogs retain their defaults. UART text is diagnostic only and is not used as the
 correctness oracle:
 
 ```sh

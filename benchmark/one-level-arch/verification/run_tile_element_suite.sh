@@ -202,12 +202,12 @@ run_case() {
         2>&1 | tee "$case_artifact/gfrun-memory.log"
 
     printf '%q ' "$gfsim" --pto059-execution-mask-dev \
-        -s core.threadCount=1 core.stdPeCount=1 --dump-force \
+        -s core.threadCount=1 core.stdPeCount=1 bctrl.assemble_enable=true --dump-force \
         --dump-memory "$dump_range:$case_artifact/gfsim.mem" -f "$elf" \
         > "$case_artifact/gfsim.argv"
     printf '\n' >> "$case_artifact/gfsim.argv"
     "$gfsim" --pto059-execution-mask-dev \
-        -s core.threadCount=1 core.stdPeCount=1 \
+        -s core.threadCount=1 core.stdPeCount=1 bctrl.assemble_enable=true \
         --dump-force \
         --dump-memory "$dump_range:$case_artifact/gfsim.mem" \
         -f "$elf" > "$case_artifact/gfsim.log" 2>&1

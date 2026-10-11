@@ -115,6 +115,12 @@ Both diagnostic output arrays preserve logical input element order, so
 `output[element]` always describes `input[element]`; application indexing does
 not expose a physical partition mapping.
 
+The runner uses the established single-context/PE0 Local execution profile.
+It explicitly enables `bctrl.assemble_enable=true` in gfsim, and records that
+feature switch in command provenance. Declared instruction masks retain their
+original values; this evidence does not establish four-PE Local generation
+support. Queue capacities and watchdogs retain their defaults.
+
 The suite also compiles the original
 [`elementwise_atomic_histogram.cpp`](../../../solution/tileop-test/vec/src/elementwise_atomic_histogram.cpp)
 with its 128 S32 values, eight bins and original byte mask input. Four logical

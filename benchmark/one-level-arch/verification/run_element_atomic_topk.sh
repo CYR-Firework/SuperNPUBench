@@ -172,7 +172,7 @@ fi
 
 set +e
 "$gfsim" --pto059-execution-mask-dev \
-    -s core.threadCount=1 core.stdPeCount=1 \
+    -s core.threadCount=1 core.stdPeCount=1 bctrl.assemble_enable=true \
     --dump-force \
     --dump-memory "$dump_range:$artifact_dir/gfsim.mem" \
     -f "$elf" \
