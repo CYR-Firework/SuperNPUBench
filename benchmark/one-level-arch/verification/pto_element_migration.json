@@ -619,7 +619,7 @@
       ],
       "evidence": {
         "acceptance_scope": "bounded original FP32 masked memory functional profile; no gfsim parity claim",
-        "spec_commit": "7b8b9a7987c42e7d96a8ba36002505258e0b6d4c",
+        "spec_commit": "8f589b70085a37c70f210898b168aae634da5ac1",
         "owning_clauses": [
           "PTO-MGATHER-BYTE-DISPLACEMENT-001",
           "PTO-MSCATTER-BYTE-DISPLACEMENT-001",
@@ -673,7 +673,8 @@
             ],
             "comparison": "exact_raw_bytes"
           }
-        ]
+        ],
+        "spec_source": "published FP32 feature specification, including TLEA/B64 address contract"
       },
       "functional_acceptance": [
         "pto_spec",
