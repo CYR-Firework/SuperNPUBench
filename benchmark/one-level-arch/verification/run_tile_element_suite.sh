@@ -125,6 +125,8 @@ fi
 
 python3 "$case_dir/test_compare_memory.py" 2>&1 \
     | tee "$artifact_dir/compare-memory-self-test.log"
+python3 "$script_dir/test_gfrun_dump.py" 2>&1 \
+    | tee "$artifact_dir/dump-self-test.log"
 
 run_case() {
     local case_name=$1
@@ -222,17 +224,8 @@ run_case() {
         --models "$MODELS" --gfrun "$gfrun" --gfsim "$gfsim" --run-exit-status 125 \
         > "$case_artifact/input-provenance.log" 2>&1
 
-    printf '%q ' "$gfrun" --pto059-execution-mask-dev \
-        -s softcore.multiThreadNum=1 --dump-force \
-        --dump-memory "$dump_range:$case_artifact/gfrun.mem" -f "$elf" \
-        > "$case_artifact/gfrun.argv"
-    printf '\n' >> "$case_artifact/gfrun.argv"
-    "$gfrun" --pto059-execution-mask-dev \
-        -s softcore.multiThreadNum=1 \
-        --dump-force \
-        --dump-memory "$dump_range:$case_artifact/gfrun.mem" \
-        -f "$elf" > "$case_artifact/gfrun.log" 2>&1
-    printf '0\n' > "$case_artifact/gfrun.exit"
+    python3 "$script_dir/gfrun_dump.py" \
+        --provenance "$case_artifact/input-provenance.json"
     grep -Eq '^Suaccelss to Reach the End of Benchmark! R2 = 0$' \
         "$case_artifact/gfrun.log"
     python3 "$case_dir/compare_memory.py" \

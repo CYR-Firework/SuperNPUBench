@@ -8,8 +8,12 @@ import datetime as dt
 import hashlib
 import json
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "verification"))
+from gfrun_dump import dump_specs, plan_dump
 
 
 IMMUTABLE_INPUT_FIELDS = (
@@ -142,6 +146,7 @@ def main() -> int:
     if not installed_api_root.is_dir() or not installed_api_files:
         raise RuntimeError("missing installed TileOp API headers: " +
                            str(installed_api_root))
+    chunks = plan_dump(args.dump_range, args.artifact_dir / "gfrun.mem")
     identity: dict[str, object] = {
         "created_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
         "target": {
@@ -150,13 +155,16 @@ def main() -> int:
             "resource_dir": str(args.resource_dir),
             "api_include": str(args.api_include),
             "selected_models": selected_models,
+            "gfrun_memory_dump": {"range": args.dump_range,
+                                  "output": str(args.artifact_dir / "gfrun.mem"),
+                                  "chunks": chunks},
         },
         "commands": {
             "gfrun": [
                 str(args.gfrun),
                 "--pto059-execution-mask-dev", "-s", "softcore.multiThreadNum=1",
                 "--dump-force", "--dump-memory",
-                f"{args.dump_range}:{args.artifact_dir / 'gfrun.mem'}",
+                *dump_specs(chunks),
                 "-f", str(args.elf),
             ],
             "gfsim": [
