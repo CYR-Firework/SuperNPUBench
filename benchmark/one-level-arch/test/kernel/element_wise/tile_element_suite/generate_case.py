@@ -92,12 +92,96 @@ def main() -> int:
         "concat_gather_s32_alias_probe",
         "group_count_s32_original", "group_count_s32_strong",
         "elementwise_if_for", "elementwise_if_for_strong",
+        "elementwise_masked_gather_scatter",
+        "elementwise_masked_gather_scatter_strong",
         "topk_boundaries", "topk_boundaries_0", "topk_boundaries_1",
         "topk_boundaries_2",
     ))
     parser.add_argument("--out", required=True, type=Path)
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
+
+    if args.case in ("elementwise_masked_gather_scatter",
+                     "elementwise_masked_gather_scatter_strong"):
+        strong = args.case.endswith("_strong")
+        if strong:
+            source_pattern = [
+                0x00000000, 0x80000000, 0x7F800000, 0xFF800000,
+                0x7FC12345, 0xFFC54321, 0x3F800000, 0xBF800000,
+                0x7F800123, 0xFF800321, 0x00000001, 0x80000001,
+                0x7F7FFFFF, 0xFF7FFFFF, 0x3EAAAAAB, 0xBEAAAAAB,
+            ]
+            active_indices = [
+                -64, -63, -62, -61, -60, -59, -58, -57,
+                8, 9, 10, 11, 12, 13, 14, 15,
+            ]
+            active_masks = [2, 3, 0x80, 0xFF]
+            poison_indices = [-0x80000000, 0x7FFFFFFF,
+                              -0x40000000, 0x40000000]
+            source = source_pattern * 8
+            indices: list[int] = []
+            mask: list[int] = []
+            for element in range(128):
+                if (element & 3) < 2:
+                    indices.append(active_indices[(element // 4) % 16])
+                    mask.append(active_masks[(element // 4) % 4])
+                else:
+                    indices.append(poison_indices[(element // 4) % 4])
+                    mask.append(0)
+            sentinel = 0x5A5A6B6B
+            output = [sentinel] * 128
+            for index, active in zip(indices, mask):
+                if active:
+                    output[64 + index] = source[64 + index]
+        else:
+            source = [
+                0x41200000, 0x41A00000, 0x41F00000, 0x42200000,
+                0x42480000, 0x42700000, 0x428C0000, 0x42A00000,
+            ] + [0] * 120
+            indices = list(range(8)) + [0] * 120
+            mask = [1, 0, 1, 0, 1, 0, 1, 0] + [0] * 120
+            output = [0] * 128
+            for index, active in zip(indices, mask):
+                if active:
+                    output[index] = source[index]
+
+        files: dict[str, tuple[str, bytes]] = {
+            "source_storage": ("source_f32_bits.bin",
+                               struct.pack("<128I", *source)),
+            "index_storage": ("indices_s32.bin",
+                              struct.pack("<128i", *indices)),
+            "mask_storage": ("mask_u8.bin", bytes(mask)),
+            "gathered_storage": ("unused_gathered_f32_bits.bin",
+                                 bytes(128 * 4)),
+        }
+        if strong:
+            files["output_guard_before"] = ("output_guard_before.bin",
+                                             bytes([0x5A]) * 64)
+        files["output_storage"] = ("output_f32_bits.bin",
+                                   struct.pack("<128I", *output))
+        if strong:
+            files["output_guard_after"] = ("output_guard_after.bin",
+                                            bytes([0xA5]) * 64)
+        segments = []
+        for symbol, (filename, data) in files.items():
+            (args.out / filename).write_bytes(data)
+            segments.append({"symbol": symbol, "kind": "exact",
+                             "file": filename})
+        (args.out / "manifest.json").write_text(json.dumps({
+            "case": args.case,
+            "count": 128,
+            "dtype": "raw_f32_bits",
+            "center": 64 if strong else 0,
+            "inactive_poison_indices": strong,
+            "duplicate_active_destinations": strong,
+            **({"adjacent_segments": [{
+                "before": "output_guard_before", "before_size": 64,
+                "body": "output_storage", "body_size": 512,
+                "after": "output_guard_after", "after_size": 64,
+            }]} if strong else {}),
+            "segments": segments,
+        }, indent=2) + "\n")
+        return 0
 
     if args.case in ("elementwise_if_for", "elementwise_if_for_strong"):
         strong = args.case == "elementwise_if_for_strong"

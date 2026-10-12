@@ -923,7 +923,95 @@ def validate_original_f32(text: str, ir_text: str | None) -> None:
         raise CheckError("FP32 original store no longer consumes its computed result")
 
 
+def validate_masked_gather_scatter_f32(text: str,
+                                       ir_text: str | None) -> None:
+    body = function_body(text, "elementwise_masked_gather_scatter")
+    lines = instruction_lines(body)
+
+    def sites(pattern: str) -> list[int]:
+        return [index for index, line in enumerate(lines)
+                if re.search(pattern, line)]
+
+    signed_loads = sites(r"\bBSTART\.TLSU\s+TLOAD, S32\b")
+    mask_loads = sites(r"\bBSTART\.TLSU\s+TLOAD, U32\b")
+    signed_moves = sites(r"\bBSTART\.TLSU\s+TMOV, S32\b")
+    mask_moves = sites(r"\bBSTART\.TLSU\s+TMOV, U32\b")
+    raw_moves = sites(r"\bBSTART\.TLSU\s+TMOV, FP32\b")
+    tleas = sites(r"\bBSTART\.TEPL\s+TLEA, S32\b")
+    gathers = sites(r"\bBSTART\.TLSU\s+MGATHER, FP32\b")
+    scatters = sites(r"\bBSTART\.TLSU\s+MSCATTER, FP32\b")
+    if list(map(len, (signed_loads, mask_loads, signed_moves, mask_moves,
+                      raw_moves, tleas, gathers, scatters))) != [1, 1, 1, 1,
+                                                                  1, 2, 1, 1]:
+        raise CheckError("FP32 masked memory lost its exact Tile/memory bridge")
+    if len(re.findall(r"\bB\.SUBVIEW\b", body)) != 2:
+        raise CheckError("FP32 masked memory needs two borrowed logical part views")
+    if not (signed_loads[0] < signed_moves[0] < tleas[0] < gathers[0] <
+            raw_moves[0] < tleas[1] < scatters[0]):
+        raise CheckError("FP32 gather/TMOV/scatter source order changed")
+    if re.search(r"\bTCVT\b|BSTART\.TEPL\s+(TADDS|TSUBS), FP32\b", body):
+        raise CheckError("FP32 masked memory introduced numeric value transport")
+    if any(token not in body for token in ("ND2M32", "CUBE_M32")):
+        raise CheckError("FP32 masked memory lost typed M32 transport")
+    native = "\n".join(lines)
+    memory_bundles = re.findall(
+        r"BSTART\.TLSU\s+(MGATHER|MSCATTER), FP32\b.*?(?=BSTART|$)",
+        native, re.S,
+    )
+    # Inspect full bundles separately because findall above returns the opcode.
+    full_bundles = re.findall(
+        r"BSTART\.TLSU\s+(?:MGATHER|MSCATTER), FP32\b.*?(?=BSTART|$)",
+        native, re.S,
+    )
+    if len(memory_bundles) != 2 or any(
+            "ExecMaskPresent" not in bundle for bundle in full_bundles):
+        raise CheckError("FP32 gather and scatter each require an execution mask")
+
+    if ir_text is None:
+        raise CheckError("FP32 masked memory requires actual-source LLVM IR")
+    ir = ir_function_body(ir_text, "elementwise_masked_gather_scatter")
+    if re.search(r"extractelement|insertelement|@llvm\.vp\.|"
+                 r"@llvm\.linx\.experimental\.element\.(region|view|scatter)|"
+                 r"\b(fadd|fsub|fmul|fdiv|fneg|fpext|fptrunc|sitofp|uitofp|fptosi|fptoui)\b|"
+                 r"@llvm\.linx\.experimental\.ew\.tcvt", ir):
+        raise CheckError("FP32 masked memory has residual scalar/region/conversion lowering")
+    tlea_calls = re.findall(
+        r"call <32 x i64> @llvm\.linx\.experimental\.ew\.tlea[^\n]*",
+        ir,
+    )
+    if len(tlea_calls) != 2 or any(
+            not re.search(r"i64 32, i64 1, i64 17, i64 29, "
+                          r"<32 x i32> .*i64 32\)", call)
+            for call in tlea_calls):
+        raise CheckError("FP32 masked memory lost signed B32 to B64 addressing")
+    gather_calls = re.findall(
+        r"call <32 x float> "
+        r"@llvm\.linx\.experimental\.ew\.mgather\.gpr\.masked[^\n]*", ir,
+    )
+    scatter_calls = re.findall(
+        r"call void "
+        r"@llvm\.linx\.experimental\.ew\.mscatter\.gpr\.masked[^\n]*", ir,
+    )
+    if len(gather_calls) != 1 or len(scatter_calls) != 1:
+        raise CheckError("FP32 masked memory needs one native gather and scatter")
+    if not re.search(r"i64 32, i64 1, i64 1, i64 0, i64 29, i64 16,",
+                     gather_calls[0]):
+        raise CheckError("FP32 gather lost F32/M32/S64 typing")
+    if not re.search(r"i64 32, i64 1, i64 1, i64 29, i64 16,",
+                     scatter_calls[0]):
+        raise CheckError("FP32 scatter lost F32/M32/S64 typing")
+    raw_transport = re.findall(
+        r'call <32 x float> asm sideeffect "BSTART\.TLSU TMOV,[^\n]*', ir,
+    )
+    if len(raw_transport) != 1:
+        raise CheckError("FP32 gathered payload needs one raw official TMOV")
+
+
 def validate(text: str, case: str, ir_text: str | None = None) -> None:
+    if case in ("elementwise_masked_gather_scatter",
+                "elementwise_masked_gather_scatter_strong"):
+        validate_masked_gather_scatter_f32(text, ir_text)
+        return
     if case in ("elementwise_if_for", "elementwise_if_for_strong"):
         validate_original_f32(text, ir_text)
         return
@@ -1050,6 +1138,35 @@ def main() -> int:
     try:
         validate(text, args.case, ir_text)
         if args.self_test:
+            if args.case in ("elementwise_masked_gather_scatter",
+                             "elementwise_masked_gather_scatter_strong"):
+                for opcode in ("MGATHER", "MSCATTER"):
+                    rejected("missing " + opcode, text.replace(
+                        opcode + ", FP32", opcode + "_REMOVED, FP32", 1),
+                        args.case, ir_text)
+                    rejected("unmasked " + opcode, re.sub(
+                        rf"(BSTART\.TLSU\s+{opcode}, FP32.*?)(?=BSTART|\Z)",
+                        lambda match: match.group(0).replace(
+                            "ExecMaskPresent", "NoExecMask"),
+                        text, count=1, flags=re.S), args.case, ir_text)
+                rejected("missing raw gathered TMOV", text.replace(
+                    "TMOV, FP32", "TMOV_REMOVED, FP32", 1),
+                    args.case, ir_text)
+                rejected("numeric gathered transport", text.replace(
+                    "TMOV, FP32", "TADDS, FP32", 1),
+                    args.case, ir_text)
+                rejected("unsigned indexed addressing", text.replace(
+                    "TLEA, S32", "TLEA, U32", 1), args.case, ir_text)
+                rejected("scalar extract fallback", text, args.case, re.sub(
+                    r"(define[^\n]*elementwise_masked_gather_scatter[^\n]*\n)",
+                    r"\1  %bad = extractelement <32 x float> undef, i32 0\n",
+                    ir_text or "", count=1))
+                rejected("residual scatter effect", text, args.case, re.sub(
+                    r"(define[^\n]*elementwise_masked_gather_scatter[^\n]*\n)",
+                    r"\1  call void @llvm.linx.experimental.element.scatter()\n",
+                    ir_text or "", count=1))
+                print(f"{args.case}: disassembly check PASS")
+                return 0
             if args.case in ("elementwise_if_for", "elementwise_if_for_strong"):
                 body = function_body(text, "elementwise_if_for")
                 arithmetic = "TNEG" if "TNEG, FP32" in body else "TSUB"

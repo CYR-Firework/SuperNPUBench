@@ -230,5 +230,115 @@ class OriginalF32BitsTest(unittest.TestCase):
         self.assertIn("dump does not cover out_storage", result.stdout)
 
 
+class MaskedGatherScatterF32BitsTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def _fixture(self, strong: bool) -> tuple[Path, Path, bytearray, dict[str, int]]:
+        case = ("elementwise_masked_gather_scatter_strong" if strong else
+                "elementwise_masked_gather_scatter")
+        golden = self.root / case
+        subprocess.run(["python3", str(HERE / "generate_case.py"), "--case",
+                        case, "--out", str(golden)], check=True)
+        manifest = json.loads((golden / "manifest.json").read_text())
+        memory = bytearray()
+        offsets: dict[str, int] = {}
+        symbol_lines = []
+        for item in manifest["segments"]:
+            data = (golden / item["file"]).read_bytes()
+            offsets[item["symbol"]] = len(memory)
+            symbol_lines.append(
+                f"{0x1000 + len(memory):016x} g O .data "
+                f"{len(data):08x} {item['symbol']}\n"
+            )
+            memory.extend(data)
+        symbols = self.root / (case + ".symbols")
+        symbols.write_text("".join(symbol_lines))
+        return golden, symbols, memory, offsets
+
+    def _compare(self, golden: Path, symbols: Path,
+                 memory: bytearray) -> subprocess.CompletedProcess[str]:
+        dump = self.root / "masked-memory.bin"
+        dump.write_bytes(memory)
+        return subprocess.run(
+            ["python3", str(HERE / "compare_memory.py"),
+             "--symbols", str(symbols), "--golden", str(golden),
+             "--dump", str(dump), "--dump-base", "0x1000"],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        )
+
+    def test_original_preserves_five_128_element_arrays(self) -> None:
+        golden, symbols, memory, offsets = self._fixture(False)
+        self.assertEqual(len(memory), 512 + 512 + 128 + 512 + 512)
+        self.assertEqual(memory[offsets["gathered_storage"]:
+                                offsets["gathered_storage"] + 512], bytes(512))
+        output = struct.unpack_from("<128I", memory, offsets["output_storage"])
+        self.assertEqual(output[:8], (0x41200000, 0, 0x41F00000, 0,
+                                      0x42480000, 0, 0x428C0000, 0))
+        self.assertEqual(self._compare(golden, symbols, memory).returncode, 0)
+
+    def test_strong_has_raw_payloads_poison_masks_and_guards(self) -> None:
+        golden, symbols, memory, offsets = self._fixture(True)
+        source = struct.unpack_from("<128I", memory, offsets["source_storage"])
+        indices = struct.unpack_from("<128i", memory, offsets["index_storage"])
+        masks = memory[offsets["mask_storage"]:offsets["mask_storage"] + 128]
+        output = struct.unpack_from("<128I", memory, offsets["output_storage"])
+        self.assertIn(0x80000000, source)
+        self.assertIn(0x7F800000, source)
+        self.assertIn(0x7FC12345, source)
+        self.assertIn(0x7F800123, source)
+        self.assertIn(0xFF800321, output)
+        self.assertIn(-0x80000000, indices)
+        self.assertIn(0x7FFFFFFF, indices)
+        self.assertTrue({2, 3, 0x80, 0xFF}.issubset(set(masks)))
+        self.assertEqual(memory[offsets["output_guard_before"]:
+                                offsets["output_guard_before"] + 64],
+                         bytes([0x5A]) * 64)
+        self.assertEqual(memory[offsets["output_guard_after"]:
+                                offsets["output_guard_after"] + 64],
+                         bytes([0xA5]) * 64)
+        # Each repeated active destination has one source-derived raw payload.
+        for element, active in enumerate(masks):
+            if active:
+                index = indices[element]
+                self.assertEqual(output[64 + index], source[64 + index])
+        result = self._compare(golden, symbols, memory)
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_rejects_nan_payload_sentinel_or_guard_corruption(self) -> None:
+        golden, symbols, memory, offsets = self._fixture(True)
+        corruptions = (
+            (offsets["output_storage"] + (64 - 60) * 4, "output_storage"),
+            (offsets["output_storage"] + (64 - 62) * 4, "output_storage"),
+            (offsets["output_guard_before"], "output_guard_before"),
+            (offsets["output_guard_after"] + 63, "output_guard_after"),
+        )
+        for offset, symbol in corruptions:
+            with self.subTest(symbol=symbol, offset=offset):
+                corrupted = memory.copy()
+                corrupted[offset] ^= 1
+                result = self._compare(golden, symbols, corrupted)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn(symbol + ": mismatch", result.stdout)
+
+    def test_rejects_nonadjacent_output_guards(self) -> None:
+        golden, symbols, memory, _ = self._fixture(True)
+        altered = []
+        for line in symbols.read_text().splitlines():
+            if line.endswith(" output_storage"):
+                fields = line.split()
+                fields[0] = f"{int(fields[0], 16) + 1:016x}"
+                line = " ".join(fields)
+            altered.append(line)
+        symbols.write_text("\n".join(altered) + "\n")
+        result = self._compare(golden, symbols, memory)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("guarded segments are not adjacent", result.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

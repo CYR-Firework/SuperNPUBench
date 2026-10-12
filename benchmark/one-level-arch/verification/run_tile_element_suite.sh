@@ -31,12 +31,14 @@ elif (( $# == 2 )) && [[ $1 == --case ]] && \
         $2 == concat_gather_s32_alias_probe || \
         $2 == group_count_s32_original || $2 == group_count_s32_strong || \
         $2 == elementwise_if_for || $2 == elementwise_if_for_strong || \
+        $2 == elementwise_masked_gather_scatter || \
+        $2 == elementwise_masked_gather_scatter_strong || \
         $2 == element_expression_chain || $2 == signed_element_expression || \
         $2 == generic_predicated_cfg_i32 || $2 == generic_typed_tile_cfg_i32 || \
         $2 == topk_boundaries* ]]; then
     cases=("$2")
 else
-    echo "usage: $0 [--case histogram_tile_element|selected_radix_tile_element|indexed_gather_tile_element|element_expression_chain|signed_element_expression|generic_predicated_cfg_i32|generic_typed_tile_cfg_i32|generic_atomic_cfg_i32|elementwise_atomic_histogram|concat_gather_s32_original|concat_gather_s32_alias_probe|group_count_s32_original|group_count_s32_strong|elementwise_if_for|elementwise_if_for_strong|topk_boundaries[_0|_1|_2]]" >&2
+    echo "usage: $0 [--case histogram_tile_element|selected_radix_tile_element|indexed_gather_tile_element|element_expression_chain|signed_element_expression|generic_predicated_cfg_i32|generic_typed_tile_cfg_i32|generic_atomic_cfg_i32|elementwise_atomic_histogram|concat_gather_s32_original|concat_gather_s32_alias_probe|group_count_s32_original|group_count_s32_strong|elementwise_if_for|elementwise_if_for_strong|elementwise_masked_gather_scatter|elementwise_masked_gather_scatter_strong|topk_boundaries[_0|_1|_2]]" >&2
     exit 2
 fi
 
@@ -50,6 +52,13 @@ case "$MODELS" in
     gfrun|gfrun,gfsim) ;;
     *) echo "MODELS must be gfrun or gfrun,gfsim" >&2; exit 2 ;;
 esac
+for case_name in "${cases[@]}"; do
+    if [[ "$case_name" == elementwise_masked_gather_scatter* &&
+          "$MODELS" != gfrun ]]; then
+        echo "$case_name is an FP32 functional case and requires MODELS=gfrun" >&2
+        exit 2
+    fi
+done
 
 TARGET_TRIPLE=${TARGET_TRIPLE:-linx64v5-unknown-linux-musl}
 SYSROOT=${SYSROOT:-"$LINX_RUNTIME_ROOT/sysroot"}
@@ -142,6 +151,8 @@ run_case() {
           "$case_name" == group_count_s32_strong ||
           "$case_name" == elementwise_if_for ||
           "$case_name" == elementwise_if_for_strong ||
+          "$case_name" == elementwise_masked_gather_scatter ||
+          "$case_name" == elementwise_masked_gather_scatter_strong ||
           "$case_name" == histogram_tile_element ||
           "$case_name" == selected_radix_tile_element ||
           "$case_name" == element_expression_chain || \
@@ -170,6 +181,8 @@ run_case() {
           "$case_name" == group_count_s32_strong ||
           "$case_name" == elementwise_if_for ||
           "$case_name" == elementwise_if_for_strong ||
+          "$case_name" == elementwise_masked_gather_scatter ||
+          "$case_name" == elementwise_masked_gather_scatter_strong ||
           "$case_name" == histogram_tile_element ||
           "$case_name" == selected_radix_tile_element ||
           "$case_name" == element_expression_chain || \

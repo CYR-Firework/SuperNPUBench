@@ -44,6 +44,25 @@ def main() -> int:
     missing = [item["symbol"] for item in segments if item["symbol"] not in symbols]
     if missing:
         raise SystemExit(f"missing ELF symbols: {', '.join(missing)}")
+    for contract in manifest.get("adjacent_segments", []):
+        before_address, before_size = symbols[contract["before"]]
+        body_address, body_size = symbols[contract["body"]]
+        after_address, after_size = symbols[contract["after"]]
+        expected_sizes = (contract["before_size"], contract["body_size"],
+                          contract["after_size"])
+        if (before_size, body_size, after_size) != expected_sizes:
+            raise SystemExit(
+                "guarded segment sizes changed: "
+                f"{contract['before']}={before_size}, "
+                f"{contract['body']}={body_size}, "
+                f"{contract['after']}={after_size}"
+            )
+        if (before_address + before_size != body_address or
+                body_address + body_size != after_address):
+            raise SystemExit(
+                f"guarded segments are not adjacent: {contract['before']} -> "
+                f"{contract['body']} -> {contract['after']}"
+            )
     low = min(symbols[item["symbol"]][0] for item in segments)
     high = max(
         symbols[item["symbol"]][0] + symbols[item["symbol"]][1]
