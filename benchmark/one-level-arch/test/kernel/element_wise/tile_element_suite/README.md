@@ -14,8 +14,8 @@ Its complete kernel loads two Tiles, copies logical 32-element parts with raw
 `TMOV`, executes a standard marked loop with `if (a > 0) a + b; else a - b`,
 and stores the result. `elementwise_if_for_strong` adds finite exact dyadic
 inputs, cancellation, signed-zero pairs, and 64-byte output guards. Both use
-independent exact raw-bit goldens with no floating tolerance. Their runtime
-closure and inventory promotion are pending.
+independent exact raw-bit goldens with no floating tolerance. Their functional acceptance is compiler + official TileOp API + gfrun;
+FP32 gfsim timing closure is tracked independently.
 
 [`histogram_tile_element.cpp`](histogram_tile_element.cpp) computes a 256-bin
 histogram over 263 elements. `TLOAD`, `TPARTVIEW`, `TADDS`, and `TANDS` prepare
@@ -123,6 +123,16 @@ self-consistent.
 Both diagnostic output arrays preserve logical input element order, so
 `output[element]` always describes `input[element]`; application indexing does
 not expose a physical partition mapping.
+
+The runner selects both models by default. Set `MODELS=gfrun` for the FP32
+functional lane; provenance records and verifies the selected models, and a
+functional PASS makes no timing claim. For example, after setting the toolchain
+and API paths, run:
+
+```sh
+MODELS=gfrun bash benchmark/one-level-arch/verification/run_tile_element_suite.sh --case elementwise_if_for
+MODELS=gfrun bash benchmark/one-level-arch/verification/run_tile_element_suite.sh --case elementwise_if_for_strong
+```
 
 The runner uses the established single-context/PE0 Local execution profile.
 It explicitly enables `bctrl.assemble_enable=true` in gfsim, and records that

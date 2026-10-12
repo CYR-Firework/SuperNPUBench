@@ -28,5 +28,7 @@ The existing suite runner selects either case using `--case`. Its IR/object
 canaries require masked native FP32 comparison and the actual arithmetic graph:
 `TNEG` → `TSEL` → `TADD` after standard LLVM folds the diamond, or masked
 `TADD`/`TSUB` joined by `TSEL`. Both require raw part Tile transport and value merge, with no residual element marker, scalar extraction
-loop, or extra floating conversion. Runtime validation and migration inventory
-promotion remain pending until a fresh same-ELF gfrun/gfsim run passes.
+loop, or extra floating conversion. FP32 functional acceptance requires fresh compiler/API builds and exact gfrun
+memory comparison, selected with `MODELS=gfrun`. FP32 gfsim execution, physical
+definedness, and raw-part transport are a separate timing PR; a functional PASS
+does not establish timing parity.

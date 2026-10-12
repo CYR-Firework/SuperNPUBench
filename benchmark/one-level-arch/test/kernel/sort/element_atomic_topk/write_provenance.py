@@ -118,9 +118,14 @@ def main() -> int:
     parser.add_argument("--dump-range", required=True)
     parser.add_argument("--run-exit-status", required=True, type=int)
     parser.add_argument("--gfrun", required=True, type=Path)
-    parser.add_argument("--gfsim", required=True, type=Path)
+    parser.add_argument("--gfsim", type=Path)
+    parser.add_argument("--models", choices=("gfrun", "gfrun,gfsim"),
+                        default="gfrun,gfsim")
     parser.add_argument("--verify-inputs-from", type=Path)
     args = parser.parse_args()
+    selected_models = args.models.split(",")
+    if "gfsim" in selected_models and args.gfsim is None:
+        parser.error("--gfsim is required when gfsim is selected")
 
     compiler_repo = Path(run("git", "rev-parse", "--show-toplevel", cwd=args.compiler_bin))
     api_repo = Path(run("git", "rev-parse", "--show-toplevel", cwd=args.api_include))
@@ -144,6 +149,7 @@ def main() -> int:
             "sysroot": str(args.sysroot),
             "resource_dir": str(args.resource_dir),
             "api_include": str(args.api_include),
+            "selected_models": selected_models,
         },
         "commands": {
             "gfrun": [
@@ -170,7 +176,8 @@ def main() -> int:
             "lld": sha256_file(args.compiler_bin / "lld"),
             "llvm_objdump": sha256_file(args.compiler_bin / "llvm-objdump"),
             "gfrun": sha256_file(args.gfrun),
-            "gfsim": sha256_file(args.gfsim),
+            **({"gfsim": sha256_file(args.gfsim)}
+               if "gfsim" in selected_models else {}),
             "runtime": {str(path): sha256_file(path) for path in runtime_files},
             "api_header": sha256_file(args.api_include / "common/pto_tileop.hpp"),
             # -mlxbc preincludes the installed TileOp API. Record that actual
@@ -193,6 +200,8 @@ def main() -> int:
             if path.is_file() and path != args.out
         },
     }
+    if "gfsim" not in selected_models:
+        del identity["commands"]["gfsim"]
     content_identity = dict(identity)
     content_identity.pop("created_utc")
     identity["content_id"] = sha256_bytes(

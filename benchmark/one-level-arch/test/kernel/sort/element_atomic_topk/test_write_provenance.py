@@ -15,7 +15,8 @@ from write_provenance import verify_immutable_inputs
 def sample_identity() -> dict[str, object]:
     return {
         "created_utc": "before",
-        "target": {"triple": "linx64v5", "resource_dir": "/resource"},
+        "target": {"triple": "linx64v5", "resource_dir": "/resource",
+                   "selected_models": ["gfrun", "gfsim"]},
         "compiler_version": "clang version test",
         "artifacts": {
             "elf": {"path": "/run/test.elf", "sha256": "elf"},
@@ -50,6 +51,9 @@ class InputProvenanceTest(unittest.TestCase):
 
     def test_rejects_changed_elf_binary_and_source(self) -> None:
         mutations = {
+            "selected models": lambda value: value["target"].update(
+                selected_models=["gfrun"]
+            ),
             "ELF": lambda value: value["artifacts"]["elf"].update(sha256="new"),
             "model binary": lambda value: value["artifacts"].update(gfrun="new"),
             "source": lambda value: value["repositories"]["benchmark"].update(

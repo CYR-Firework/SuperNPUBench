@@ -45,6 +45,12 @@ fi
 : "${LINX_RUNTIME_ROOT:?set LINX_RUNTIME_ROOT to a complete Linx musl toolchain root}"
 : "${API_INCLUDE:?set API_INCLUDE to the current Linx-TileOP-API include directory}"
 
+MODELS=${MODELS:-gfrun,gfsim}
+case "$MODELS" in
+    gfrun|gfrun,gfsim) ;;
+    *) echo "MODELS must be gfrun or gfrun,gfsim" >&2; exit 2 ;;
+esac
+
 TARGET_TRIPLE=${TARGET_TRIPLE:-linx64v5-unknown-linux-musl}
 SYSROOT=${SYSROOT:-"$LINX_RUNTIME_ROOT/sysroot"}
 RESOURCE_DIR=${RESOURCE_DIR:-"$LINX_RUNTIME_ROOT/lib/clang/15.0.4"}
@@ -83,13 +89,17 @@ for required in \
     "$RESOURCE_DIR/include" \
     "$api_source_include/common/pto_tileop.hpp" \
     "$api_source_root/Makefile" \
-    "$gfrun" \
-    "$gfsim"; do
+    "$gfrun"; do
     if [[ ! -e "$required" ]]; then
         echo "missing required compiler/runtime/model input: $required" >&2
         exit 1
     fi
 done
+
+if [[ "$MODELS" == gfrun,gfsim && ! -e "$gfsim" ]]; then
+    echo "missing selected timing model: $gfsim" >&2
+    exit 1
+fi
 
 make -C "$api_source_root" install \
     INSTALL_DIR="$installed_api_include" \
@@ -187,7 +197,7 @@ run_case() {
         --golden-dir "$golden" --target-triple "$TARGET_TRIPLE" \
         --sysroot "$SYSROOT" --resource-dir "$RESOURCE_DIR" \
         --artifact-dir "$case_artifact" --dump-range "$dump_range" \
-        --gfrun "$gfrun" --gfsim "$gfsim" --run-exit-status 125 \
+        --models "$MODELS" --gfrun "$gfrun" --gfsim "$gfsim" --run-exit-status 125 \
         > "$case_artifact/input-provenance.log" 2>&1
 
     printf '%q ' "$gfrun" --pto059-execution-mask-dev \
@@ -208,42 +218,45 @@ run_case() {
         --dump "$case_artifact/gfrun.mem" --dump-base "$dump_base" \
         2>&1 | tee "$case_artifact/gfrun-memory.log"
 
-    printf '%q ' "$gfsim" --pto059-execution-mask-dev \
-        -s core.threadCount=1 core.stdPeCount=1 bctrl.assemble_enable=true --dump-force \
-        --dump-memory "$dump_range:$case_artifact/gfsim.mem" -f "$elf" \
-        > "$case_artifact/gfsim.argv"
-    printf '\n' >> "$case_artifact/gfsim.argv"
-    "$gfsim" --pto059-execution-mask-dev \
-        -s core.threadCount=1 core.stdPeCount=1 bctrl.assemble_enable=true \
-        --dump-force \
-        --dump-memory "$dump_range:$case_artifact/gfsim.mem" \
-        -f "$elf" > "$case_artifact/gfsim.log" 2>&1
-    printf '0\n' > "$case_artifact/gfsim.exit"
-    grep -Eq 'Total Cycles|total cycles|cycle_count' "$case_artifact/gfsim.log"
-    local invariant_status=0
-    if ! grep -Eq \
-        'invariants:.*stq_conservation=OK \(created=[0-9]+ destroyed=[0-9]+\).*a3_tile_violation=0([[:space:]]|$)' \
-        "$case_artifact/gfsim.log"; then
-        invariant_status=1
+    if [[ "$MODELS" == gfrun,gfsim ]]; then
+        printf '%q ' "$gfsim" --pto059-execution-mask-dev \
+            -s core.threadCount=1 core.stdPeCount=1 bctrl.assemble_enable=true --dump-force \
+            --dump-memory "$dump_range:$case_artifact/gfsim.mem" -f "$elf" \
+            > "$case_artifact/gfsim.argv"
+        printf '\n' >> "$case_artifact/gfsim.argv"
+        "$gfsim" --pto059-execution-mask-dev \
+            -s core.threadCount=1 core.stdPeCount=1 bctrl.assemble_enable=true \
+            --dump-force \
+            --dump-memory "$dump_range:$case_artifact/gfsim.mem" \
+            -f "$elf" > "$case_artifact/gfsim.log" 2>&1
+        printf '0\n' > "$case_artifact/gfsim.exit"
+        grep -Eq 'Total Cycles|total cycles|cycle_count' "$case_artifact/gfsim.log"
+        local invariant_status=0
+        if ! grep -Eq \
+            'invariants:.*stq_conservation=OK \(created=[0-9]+ destroyed=[0-9]+\).*a3_tile_violation=0([[:space:]]|$)' \
+            "$case_artifact/gfsim.log"; then
+            invariant_status=1
+        fi
+        if grep -Eiq \
+            'LOG_ERROR|ASSERTION|(^|[^[:alpha:]])assert([^[:alpha:]]|$)' \
+            "$case_artifact/gfsim.log"; then
+            invariant_status=1
+        fi
+        printf '%s\n' "$invariant_status" \
+            > "$case_artifact/gfsim-invariants.exit"
+        if (( invariant_status != 0 )); then
+            echo "$case_name: gfsim invariant gate failed" >&2
+            exit "$invariant_status"
+        fi
+        printf '%s\n' \
+            'gfsim completion is established by exit status and checked status memory; it does not emit an R2 line.' \
+            > "$case_artifact/gfsim-r2-contract.txt"
+        python3 "$case_dir/compare_memory.py" \
+            --symbols "$symbols" --golden "$golden" \
+            --dump "$case_artifact/gfsim.mem" --dump-base "$dump_base" \
+            2>&1 | tee "$case_artifact/gfsim-memory.log"
+
     fi
-    if grep -Eiq \
-        'LOG_ERROR|ASSERTION|(^|[^[:alpha:]])assert([^[:alpha:]]|$)' \
-        "$case_artifact/gfsim.log"; then
-        invariant_status=1
-    fi
-    printf '%s\n' "$invariant_status" \
-        > "$case_artifact/gfsim-invariants.exit"
-    if (( invariant_status != 0 )); then
-        echo "$case_name: gfsim invariant gate failed" >&2
-        exit "$invariant_status"
-    fi
-    printf '%s\n' \
-        'gfsim completion is established by exit status and checked status memory; it does not emit an R2 line.' \
-        > "$case_artifact/gfsim-r2-contract.txt"
-    python3 "$case_dir/compare_memory.py" \
-        --symbols "$symbols" --golden "$golden" \
-        --dump "$case_artifact/gfsim.mem" --dump-base "$dump_base" \
-        2>&1 | tee "$case_artifact/gfsim-memory.log"
 
     python3 "$bench_root/test/kernel/sort/element_atomic_topk/write_provenance.py" \
         --out "$case_artifact/provenance.json" \
@@ -253,7 +266,7 @@ run_case() {
         --golden-dir "$golden" --target-triple "$TARGET_TRIPLE" \
         --sysroot "$SYSROOT" --resource-dir "$RESOURCE_DIR" \
         --artifact-dir "$case_artifact" --dump-range "$dump_range" \
-        --gfrun "$gfrun" --gfsim "$gfsim" --run-exit-status 0 \
+        --models "$MODELS" --gfrun "$gfrun" --gfsim "$gfsim" --run-exit-status 0 \
         --verify-inputs-from "$case_artifact/input-provenance.json" \
         > "$case_artifact/provenance.log" 2>&1
     echo "$case_name: PASS"
@@ -264,7 +277,7 @@ for case_name in "${cases[@]}"; do
 done
 
 printf '%s\n' \
-    "All ${#cases[@]} selected fresh TileOp ELFs passed disassembly, gfrun, gfrun memory, gfsim invariants, and gfsim memory checks." \
+    "All ${#cases[@]} selected fresh TileOp ELFs passed compile/disassembly and independent memory checks for models=$MODELS; timing invariants checked when gfsim is selected." \
     > "$artifact_dir/PASS"
 printf '%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$artifact_dir/FROZEN"
 hash_manifest="$artifact_dir/.SHA256SUMS.tmp"
