@@ -606,7 +606,7 @@
       "id": "elementwise_masked_gather_scatter",
       "source": "benchmark/one-level-arch/test/solution/tileop-test/vec/src/elementwise_masked_gather_scatter.cpp",
       "access_kind": "masked_indexed_memory",
-      "status": "pending",
+      "status": "verified_functional_profile",
       "requirements": [
         "canonical_pto_element_for",
         "logical_element_arrays",
@@ -617,7 +617,84 @@
         "same_elf_gfsim",
         "zero_model_invariants"
       ],
-      "evidence": null
+      "evidence": {
+        "acceptance_scope": "bounded original FP32 masked memory functional profile; no gfsim parity claim",
+        "spec_commit": "7b8b9a7987c42e7d96a8ba36002505258e0b6d4c",
+        "owning_clauses": [
+          "PTO-MGATHER-BYTE-DISPLACEMENT-001",
+          "PTO-MSCATTER-BYTE-DISPLACEMENT-001",
+          "PTO-MSCATTER-DUPLICATE-ORDER-001"
+        ],
+        "compiler_commit": "c1116751a03bd78b5dd2dd9141349cdc619b11cc",
+        "benchmark_execution_commit": "bfa549d2a38087da9aef17c91fd6ea41090b780d",
+        "model_commit": "965d5fd2e87f6066de337593d03d0d80ed321838",
+        "api_commit": "b95ac2ef2b471205c8865944c00712081f2362ce",
+        "compiler_focused_tests": "36/36 PASS",
+        "comparator_tests": "12/12 PASS",
+        "independent_evidence_audit": "54/54 SHA256 entries; original5/5 and strong7/7 raw segments; clean exact inputs; adjacent64/512/64 output guards",
+        "runs": [
+          {
+            "run_id": "20261012-fp32-memory-original-final",
+            "case": "elementwise_masked_gather_scatter",
+            "selected_models": [
+              "gfrun"
+            ],
+            "provenance_sha256": "a1fda2e430fff38ddf0d34680dde6a458bbc239a4e0b4fb1b6a7788da03a8075",
+            "elf_sha256": "dc10b4d2d7f465553f6994a79293221fbfcb5fd5049cd0d532306f297a3538d9",
+            "manifest_sha256": "55fcda3bfddf63f73769a46b5f6cdc519bd869b39e56e01c314ca48974e5eb1a",
+            "content_id": "2f75548fccd2444f2a9677283cffaeb663e9a84aeda5d890389c83298d777a49",
+            "segments": [
+              "source_storage",
+              "index_storage",
+              "mask_storage",
+              "gathered_storage",
+              "output_storage"
+            ],
+            "comparison": "exact_raw_bytes"
+          },
+          {
+            "run_id": "20261012-fp32-memory-strong-final",
+            "case": "elementwise_masked_gather_scatter_strong",
+            "selected_models": [
+              "gfrun"
+            ],
+            "provenance_sha256": "2ad014bd20d180501383bb36f7f5a26f826477fbd5eb8276e6a8f9b1e923d35c",
+            "elf_sha256": "81887c082b4fcc461cb856cef647ea2b037951d531a875c981582f80ee496c72",
+            "manifest_sha256": "3d5cdb9fe7daa01e66831e4414a8c43be2e9123bec6902668e6b32c104b8a6d3",
+            "content_id": "ff2540050ccf0ee1435e345fae1387cb00368729b5283fd39e4ca3a9c1fdf12e",
+            "segments": [
+              "source_storage",
+              "index_storage",
+              "mask_storage",
+              "gathered_storage",
+              "output_guard_before",
+              "output_storage",
+              "output_guard_after"
+            ],
+            "comparison": "exact_raw_bytes"
+          }
+        ]
+      },
+      "functional_acceptance": [
+        "pto_spec",
+        "compiler",
+        "official_tileop_api",
+        "gfrun"
+      ],
+      "timing_status": "pending_separate_pr",
+      "validated_profile": {
+        "value_dtype": "FP32",
+        "element_index_dtype": "S32",
+        "byte_offset_dtype": "S64",
+        "part_elements": 32,
+        "input_elements": 128,
+        "mask_storage_dtype": "U8",
+        "mask_transport_dtype": "U32",
+        "inter_element_order": "unordered",
+        "intra_element_order": "source",
+        "comparison": "exact_raw_bytes",
+        "duplicate_destinations": "strong case writes identical payloads to each repeated destination"
+      }
     }
   ],
   "multi_thread_wrappers": [

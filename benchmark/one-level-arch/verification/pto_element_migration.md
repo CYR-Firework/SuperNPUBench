@@ -51,19 +51,39 @@ FP32 本轮验收按用户要求为 pto-spec + compiler + gfrun；runner 显式
 definedness、masked TNEG 和 raw-part TMOV 在独立 timing PR 中继续，
 functional PASS 不代表 gfsim parity。其余应用/wrapper 仍按原范围跟踪。
 
+## FP32 masked memory functional 闭环
+
+原 `elementwise_masked_gather_scatter` 保留五个128-element数组、原始U8 mask、
+原始输出和未使用的零 `gathered_storage`。公开API加载S32索引与U32 mask
+transport，通过32-element parts 执行普通C++ masked gather、raw `TMOV`、
+普通C++ masked scatter。没有私有生产头文件或kernel识别器。
+
+独立强化用例保持128-element容量，覆盖signed负索引、inactive危险索引、
+非0/1字节mask、重复地址相同payload、正负zero/inf/qNaN/sNaN以及subnormal。
+输出guard的实际ELF地址严格相邻。两次clean-input运行均PASS+FROZEN：
+`20261012-fp32-memory-original-final` 和 `20261012-fp32-memory-strong-final`。
+执行输入为compiler `c1116751a03`、benchmark `bfa549d`、API `b95ac2ef`、
+gfrun `965d5fd2`。独立审计验证54项SHA256、全部5/7段原始内存以及输入不变。
+编译器36项定向测试与12项oracle/破坏性canary测试通过。
+
+此项仅新增一个FP32 functional profile：现有3个历史双模型profile、2个FP32
+functional profile；其余16条原应用及4个wrapper仍未闭环。API后续修复和
+整数B.ASSEMBLE工作使用独立提交/证据，不混入上述冻结版本。
+
 ## 当前缺口
 
-- 其余17条原应用路径和4个多线程 wrapper 仍待完整迁移与验证；
+- 其余16条原应用路径和4个多线程 wrapper 仍待完整迁移与验证；
   已完成 functional 验证的 FP32 应用仅剩独立 timing 跟进。
   特别是原 gather 的 rank-2 FP32 行索引/广播和四个配置，不能由 U32
   indexed-gather foundation 替代。concat 的 S32/FP16、512 元素及完整数据容量
   也仍须保留，不能缩小成 32 元素测试来宣称完成。
-- 编译器当前物理 element profile 为 32 个 S32/U32 元素，已支持普通 CFG 的
-  if/continue/PHI、readonly indexed i32 gather、证明独立的 unit-stride i32
-  scatter，以及对齐、非 volatile、System/Monotonic i32 atomic add。
-  FP32 的32-element functional profile 已单独闭环；varying 内层循环、
-  FP16 与更宽物理 carrier、其他原子操作/ordering、
-  可能重叠的普通 indexed 写入和 O0 typed spill 仍未闭合。
+- 当前已验证的32-element profile包括S32/U32和FP32。普通CFG的
+  if/continue/PHI、i32/f32 indexed gather、独立unit-stride scatter，以及
+  明确unordered/source契约下的单一隔离indexed scatter已有编译支持。
+  System/Monotonic i32 atomic add保持既有约束。FP32 memory现已取得原应用
+  functional证据；这不代表任意别名或多条无序写流都可接受。
+  varying内层循环、原配置所需的FP16/更宽carrier、其他原子操作/ordering、
+  未证明隔离的indexed写入和O0 typed spill仍未闭合。
 - API 提供某 dtype 的存储/transport，不等于该 dtype 的 marked element loop
   已可执行。QLI 私有 histogram 汇编、稀疏 MLA 的 spill/标量索引阶段、动态
   哈希探测都需要各自的完整算法迁移，不能用新的小型 histogram 替代。
