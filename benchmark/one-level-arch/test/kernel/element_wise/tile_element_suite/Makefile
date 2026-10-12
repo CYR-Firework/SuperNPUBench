@@ -6,6 +6,7 @@ SUPPORTED_CASES := histogram_tile_element selected_radix_tile_element \
 	element_expression_chain signed_element_expression indexed_gather_tile_element \
 	generic_predicated_cfg_i32 generic_typed_tile_cfg_i32 generic_atomic_cfg_i32 elementwise_atomic_histogram \
 	concat_gather_s32_original concat_gather_s32_alias_probe \
+	concat_gather_f16_original concat_gather_f16_alias_probe \
 	group_count_s32_original group_count_s32_strong \
 	elementwise_if_for elementwise_if_for_strong \
 	elementwise_masked_gather_scatter elementwise_masked_gather_scatter_strong \
@@ -49,6 +50,10 @@ ifeq ($(TESTCASE),concat_gather_s32_alias_probe)
 SRC_FILE := $(CURDIR)/concat_gather_s32_original.cpp
 DEFINES += -DCONCAT_GATHER_S32_ALIAS_PROBE=1
 endif
+ifeq ($(TESTCASE),concat_gather_f16_alias_probe)
+SRC_FILE := $(CURDIR)/concat_gather_f16_original.cpp
+DEFINES += -DCONCAT_GATHER_F16_ALIAS_PROBE=1
+endif
 ifeq ($(TESTCASE),elementwise_atomic_histogram)
 SRC_FILE := $(CURDIR)/../../../solution/tileop-test/vec/src/elementwise_atomic_histogram.cpp
 endif
@@ -76,7 +81,8 @@ ifneq ($(filter element_expression_chain signed_element_expression \
 	indexed_gather_tile_element histogram_tile_element \
 	selected_radix_tile_element generic_predicated_cfg_i32 \
 	generic_typed_tile_cfg_i32 generic_atomic_cfg_i32 elementwise_atomic_histogram \
-	concat_gather_s32_original concat_gather_s32_alias_probe topk_boundaries \
+	concat_gather_s32_original concat_gather_s32_alias_probe \
+	concat_gather_f16_original concat_gather_f16_alias_probe topk_boundaries \
 	group_count_s32_original group_count_s32_strong \
 	elementwise_if_for elementwise_if_for_strong \
 	elementwise_masked_gather_scatter elementwise_masked_gather_scatter_strong \

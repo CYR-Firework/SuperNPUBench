@@ -340,5 +340,165 @@ class MaskedGatherScatterF32BitsTest(unittest.TestCase):
         self.assertIn("guarded segments are not adjacent", result.stdout)
 
 
+class ConcatGatherF16BitsTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    @staticmethod
+    def _source_element(global_index: int) -> int:
+        row = (global_index // 8000) % 256
+        column = global_index % 8000
+        return (column // 8) * (256 * 8) + row * 8 + column % 8
+
+    @staticmethod
+    def _input_bits(element: int) -> int:
+        return (element * 40503 + 0x35A7) & 0xFFFF
+
+    def _fixture(
+        self, alias: bool
+    ) -> tuple[Path, Path, bytearray, dict[str, int]]:
+        case = ("concat_gather_f16_alias_probe" if alias else
+                "concat_gather_f16_original")
+        golden = self.root / case
+        subprocess.run(
+            ["python3", str(HERE / "generate_case.py"), "--case", case,
+             "--out", str(golden)],
+            check=True,
+        )
+        manifest = json.loads((golden / "manifest.json").read_text())
+        memory = bytearray()
+        offsets: dict[str, int] = {}
+        symbol_lines = []
+        guard_order = {
+            "concat_gather_f16_original_output_guard_before": 0,
+            "concat_gather_f16_original_output": 1,
+            "concat_gather_f16_original_output_guard_after": 2,
+        }
+        for item in sorted(manifest["segments"],
+                           key=lambda item: guard_order.get(item["symbol"], 3)):
+            data = (golden / item["file"]).read_bytes()
+            offsets[item["symbol"]] = len(memory)
+            symbol_lines.append(
+                f"{0x1000 + len(memory):016x} g O .data "
+                f"{len(data):08x} {item['symbol']}\n"
+            )
+            memory.extend(data)
+        symbols = self.root / (case + ".symbols")
+        symbols.write_text("".join(symbol_lines))
+        return golden, symbols, memory, offsets
+
+    def _compare(self, golden: Path, symbols: Path,
+                 memory: bytearray) -> subprocess.CompletedProcess[str]:
+        dump = self.root / "concat-f16-memory.bin"
+        dump.write_bytes(memory)
+        return subprocess.run(
+            ["python3", str(HERE / "compare_memory.py"),
+             "--symbols", str(symbols), "--golden", str(golden),
+             "--dump", str(dump), "--dump-base", "0x1000"],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        )
+
+    def test_original_preserves_full_raw_input_output_and_guards(self) -> None:
+        golden, symbols, memory, offsets = self._fixture(False)
+        input_offset = offsets["concat_gather_f16_original_input"]
+        output_offset = offsets["concat_gather_f16_original_output"]
+        before_offset = offsets[
+            "concat_gather_f16_original_output_guard_before"
+        ]
+        after_offset = offsets[
+            "concat_gather_f16_original_output_guard_after"
+        ]
+        self.assertEqual(
+            memory[before_offset:before_offset + 64],
+            struct.pack("<32H", *([0x5A5A] * 32)),
+        )
+        self.assertEqual(
+            memory[after_offset:after_offset + 64],
+            struct.pack("<32H", *([0x5A5A] * 32)),
+        )
+        nan_global = next(
+            global_index
+            for global_index in range(2048000)
+            if ((self._input_bits(self._source_element(global_index)) &
+                 0x7C00) == 0x7C00 and
+                (self._input_bits(self._source_element(global_index)) &
+                 0x03FF) != 0)
+        )
+        raw_nan = struct.unpack_from(
+            "<H", memory, output_offset + nan_global * 2
+        )[0]
+        self.assertEqual(raw_nan & 0x7C00, 0x7C00)
+        self.assertNotEqual(raw_nan & 0x03FF, 0)
+        result = self._compare(golden, symbols, memory)
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_alias_probe_captures_one_complete_512_element_snapshot(self) -> None:
+        golden, symbols, memory, offsets = self._fixture(True)
+        input_offset = offsets["concat_gather_f16_original_input"]
+        output_offset = offsets["concat_gather_f16_original_output"]
+        before_offset = offsets[
+            "concat_gather_f16_original_output_guard_before"
+        ]
+        after_offset = offsets[
+            "concat_gather_f16_original_output_guard_after"
+        ]
+        alias_bits = struct.unpack_from(
+            "<512H", memory, input_offset + 2049 * 2
+        )
+        for global_index, actual in enumerate(alias_bits):
+            expected = self._input_bits(self._source_element(global_index))
+            self.assertEqual(actual, expected)
+        self.assertEqual(
+            memory[output_offset:output_offset + 512 * 2],
+            struct.pack("<512H", *([0x5A5A] * 512)),
+        )
+        self.assertEqual(memory[before_offset:before_offset + 64],
+                         struct.pack("<32H", *([0x5A5A] * 32)))
+        self.assertEqual(memory[after_offset:after_offset + 64],
+                         struct.pack("<32H", *([0x5A5A] * 32)))
+        result = self._compare(golden, symbols, memory)
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_rejects_raw_payload_guard_and_unused_tail_corruption(self) -> None:
+        golden, symbols, memory, offsets = self._fixture(False)
+        input_offset = offsets["concat_gather_f16_original_input"]
+        output_offset = offsets["concat_gather_f16_original_output"]
+        guard_offset = offsets[
+            "concat_gather_f16_original_output_guard_before"
+        ]
+        corruptions = (
+            (input_offset + (8192000 - 1) * 2,
+             "concat_gather_f16_original_input"),
+            (guard_offset, "concat_gather_f16_original_output_guard_before"),
+            (output_offset + 0x7C01 * 2,
+             "concat_gather_f16_original_output"),
+        )
+        for offset, symbol in corruptions:
+            with self.subTest(symbol=symbol, offset=offset):
+                corrupted = memory.copy()
+                corrupted[offset] ^= 1
+                result = self._compare(golden, symbols, corrupted)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn(symbol + ": mismatch", result.stdout)
+
+    def test_rejects_nonadjacent_output_guards(self) -> None:
+        golden, symbols, memory, _ = self._fixture(False)
+        altered = []
+        for line in symbols.read_text().splitlines():
+            if line.endswith(" concat_gather_f16_original_output"):
+                fields = line.split()
+                fields[0] = f"{int(fields[0], 16) + 2:016x}"
+                line = " ".join(fields)
+            altered.append(line)
+        symbols.write_text("\n".join(altered) + "\n")
+        result = self._compare(golden, symbols, memory)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("guarded segments are not adjacent", result.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

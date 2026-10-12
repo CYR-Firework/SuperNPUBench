@@ -769,6 +769,53 @@ def validate_concat_original(text: str, ir_text: str | None) -> None:
         raise CheckError("concat parent allocation no longer preserves 512 elements")
 
 
+def validate_concat_f16_original(text: str, ir_text: str | None) -> None:
+    if ir_text is None:
+        raise CheckError("original F16 concat requires LLVM IR evidence")
+    body = function_body(text, "concat_gather")
+    ir = ir_function_body(ir_text, "concat_gather")
+    if re.search(r"extractelement|insertelement|freeze <64 x half>|llvm\.vp\.|"
+                 r"llvm\.linx\.experimental\.element\.(region|view)|"
+                 r"\b(fpext|fptrunc|sitofp|uitofp|fptosi|fptoui)\b|"
+                 r"llvm\.linx\.experimental\.ew\.tcvt", ir):
+        raise CheckError("F16 concat contains residual or numeric conversion lowering")
+    reads = re.findall(
+        r"call <64 x half> "
+        r"@llvm\.linx\.experimental\.ew\.mgather\.gpr\.masked\.v64f16\.v64i64[^\n]*",
+        ir,
+    )
+    offsets = re.findall(
+        r"call <64 x i64> @llvm\.linx\.experimental\.ew\.tlea[^\n]*",
+        ir,
+    )
+    if len(reads) != 1 or len(offsets) != 1:
+        raise CheckError("F16 concat needs one native 64-element readonly gather")
+    if not re.search(r"i64 32, i64 2, i64 4, i64 0, i64 29, i64 24,",
+                     reads[0]):
+        raise CheckError("F16 concat lost its FP16/M32/U64 gather ABI")
+    if not re.search(r"i64 32, i64 2, i64 25, i64 29, <64 x i32>", offsets[0]) or not offsets[0].endswith("i64 16)"):
+        raise CheckError("F16 concat lost its U32-to-B64 offset shape or 16-bit element scaling")
+    if not re.search(r"BSTART\.TLSU TSTORE[^\n]*<512 x half>", ir):
+        raise CheckError("F16 concat lost its whole 512-element raw store")
+
+    native = "\n".join(instruction_lines(body))
+    if len(re.findall(r"BSTART\.TLSU\s+MGATHER, FP16", native)) != 1:
+        raise CheckError("F16 concat lost its indexed read")
+    if len(re.findall(r"BSTART\.TLSU\s+TMOV, FP16", native)) != 3:
+        raise CheckError("F16 concat needs raw TMOV for INIT, MID and LAST")
+    if len(re.findall(r"BSTART\.TLSU\s+TSTORE, FP16", native)) != 1:
+        raise CheckError("F16 concat must publish one complete batch")
+    if re.search(r"BSTART\.TEPL\s+TCVT, FP16", native):
+        raise CheckError("F16 concat introduced a numeric identity conversion")
+    if "B.ASSEMBLE" not in native:
+        raise CheckError("F16 concat lost zero-copy parent assembly")
+    if not re.search(r"B\.ASSEMBLE\s+1, 0,", native) or not re.search(
+            r"B\.ASSEMBLE\s+0, 1,", native):
+        raise CheckError("F16 concat lost INIT/LAST publication")
+    if "<1KB>" not in native:
+        raise CheckError("F16 concat parent allocation no longer preserves 512 elements")
+
+
 def validate_original_f32(text: str, ir_text: str | None) -> None:
     body = function_body(text, "elementwise_if_for")
     lines = instruction_lines(body)
@@ -1018,6 +1065,9 @@ def validate(text: str, case: str, ir_text: str | None = None) -> None:
     if case in ("group_count_s32_original", "group_count_s32_strong"):
         validate_group_count(text, ir_text)
         return
+    if case in ("concat_gather_f16_original", "concat_gather_f16_alias_probe"):
+        validate_concat_f16_original(text, ir_text)
+        return
     if case in ("concat_gather_s32_original", "concat_gather_s32_alias_probe"):
         validate_concat_original(text, ir_text)
         return
@@ -1221,6 +1271,26 @@ def main() -> int:
                     rejected("residual element " + marker, text, args.case,
                              re.sub(r"(define[^\n]*concat_gather[^\n]*\n)",
                                     rf"\1  call void @llvm.linx.experimental.element.{marker}()\n", ir_text or "", count=1))
+                print(f"{args.case}: disassembly check PASS")
+                return 0
+            if args.case in ("concat_gather_f16_original", "concat_gather_f16_alias_probe"):
+                rejected("missing raw part TMOV", text.replace(
+                    "TMOV, FP16", "TMOV_REMOVED, FP16", 1),
+                    args.case, ir_text)
+                rejected("numeric part conversion", text.replace(
+                    "TMOV, FP16", "TCVT, FP16", 1),
+                    args.case, ir_text)
+                rejected("missing assembly completion", text.replace(
+                    "B.ASSEMBLE", "B.ASSEMBLE_REMOVED"), args.case, ir_text)
+                rejected("shrunk logical parent", text.replace(
+                    "<1KB>", "<128B>"), args.case, ir_text)
+                rejected("wrong element address scaling", text, args.case, re.sub(
+                    r"(@llvm\.linx\.experimental\.ew\.tlea[^\n]*, i64 )16\)",
+                    r"\g<1>32)", ir_text or "", count=1))
+                rejected("residual scalar extraction", text, args.case, re.sub(
+                    r"(define[^\n]*concat_gather[^\n]*\n)",
+                    r"\1  %bad = extractelement <64 x half> undef, i32 0\n",
+                    ir_text or "", count=1))
                 print(f"{args.case}: disassembly check PASS")
                 return 0
             is_topk = (args.case == "topk_boundaries" or

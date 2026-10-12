@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import json
 import struct
+import sys
+from array import array
 from pathlib import Path
 
 COUNT = 263
@@ -82,6 +84,19 @@ def write_u32(path: Path, values: list[int]) -> None:
     path.write_bytes(struct.pack(f"<{len(values)}I", *values))
 
 
+def write_u16_array(path: Path, values: array) -> None:
+    if values.typecode != "H" or values.itemsize != 2:
+        raise ValueError("u16 golden requires a two-byte unsigned-short array")
+    if sys.byteorder == "little":
+        with path.open("wb") as stream:
+            values.tofile(stream)
+        return
+    little_endian = array("H", values)
+    little_endian.byteswap()
+    with path.open("wb") as stream:
+        little_endian.tofile(stream)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--case", required=True, choices=(
@@ -89,7 +104,8 @@ def main() -> int:
         "element_expression_chain", "signed_element_expression", "indexed_gather_tile_element",
         "generic_predicated_cfg_i32", "generic_typed_tile_cfg_i32",
         "generic_atomic_cfg_i32", "elementwise_atomic_histogram", "concat_gather_s32_original",
-        "concat_gather_s32_alias_probe",
+        "concat_gather_s32_alias_probe", "concat_gather_f16_original",
+        "concat_gather_f16_alias_probe",
         "group_count_s32_original", "group_count_s32_strong",
         "elementwise_if_for", "elementwise_if_for_strong",
         "elementwise_masked_gather_scatter",
@@ -341,6 +357,85 @@ def main() -> int:
             "case": args.case, "input_count": input_count,
             "output_count": output_count, "logical_batch": 512,
             "alias_offset": 2049 if alias else None, "segments": segments,
+        }, indent=2) + "\n")
+        return 0
+
+    if args.case in ("concat_gather_f16_original", "concat_gather_f16_alias_probe"):
+        input_count = 4000 * 256 * 8
+        used_input_count = 1000 * 256 * 8
+        rows, columns, tensors = 256, 8, 1000
+        alias = args.case == "concat_gather_f16_alias_probe"
+        output_count = 512 if alias else rows * tensors * columns
+        alias_offset = 2049
+        guard = 0x5A5A
+
+        # Keep the 16 MiB input and 4 MiB output compact. The odd multiplier
+        # walks every raw binary16 encoding, including signed zero, infinities,
+        # and NaN payloads, without constructing millions of Python integers.
+        input_values = array(
+            "H",
+            ((element * 40503 + 0x35A7) & 0xFFFF
+             for element in range(input_count)),
+        )
+        concatenated = array("H")
+        for row in range(rows):
+            for tensor in range(tensors):
+                start = tensor * rows * columns + row * columns
+                concatenated.extend(input_values[start:start + columns])
+
+        if alias:
+            input_values[alias_offset:alias_offset + output_count] = \
+                concatenated[:output_count]
+            output_values = array("H", [guard]) * output_count
+        else:
+            output_values = concatenated
+
+        prefix = "concat_gather_f16_original_"
+        segments = []
+        for name, values in (("input", input_values),
+                             ("output", output_values)):
+            filename = name + "_u16.bin"
+            write_u16_array(args.out / filename, values)
+            segments.append({"symbol": prefix + name, "kind": "exact",
+                             "file": filename})
+        guard_values = array("H", [guard]) * 32
+        for name in ("output_guard_before", "output_guard_after"):
+            filename = name + "_u16.bin"
+            write_u16_array(args.out / filename, guard_values)
+            segments.append({"symbol": prefix + name, "kind": "exact",
+                             "file": filename})
+
+        status = [0, 0, 0, 0, 0, input_count, output_count, 512,
+                  rows, columns, tensors * columns, tensors,
+                  used_input_count, 0x43474631]
+        write_u32(args.out / "status_u32.bin", status)
+        segments.append({"symbol": prefix + "status", "kind": "exact",
+                         "file": "status_u32.bin"})
+        for name, shape in (("in_shape", [rows, columns] + [0] * 6),
+                            ("out_shape", [rows, tensors * columns] + [0] * 6)):
+            filename = name + ".bin"
+            (args.out / filename).write_bytes(struct.pack("<8Q", *shape))
+            segments.append({"symbol": prefix + name, "kind": "exact",
+                             "file": filename})
+
+        (args.out / "manifest.json").write_text(json.dumps({
+            "case": args.case,
+            "input_count": input_count,
+            "used_input_count": used_input_count,
+            "output_count": output_count,
+            "logical_batch": 512,
+            "logical_part": 64,
+            "alias_offset": alias_offset if alias else None,
+            "raw_binary16": True,
+            "input_fixture": "deterministic raw binary16; legacy driver had uninitialized buffers and no enabled file fixture",
+            "adjacent_segments": [{
+                "before": prefix + "output_guard_before",
+                "body": prefix + "output",
+                "after": prefix + "output_guard_after",
+                "before_size": 64, "body_size": output_count * 2,
+                "after_size": 64,
+            }],
+            "segments": segments,
         }, indent=2) + "\n")
         return 0
 

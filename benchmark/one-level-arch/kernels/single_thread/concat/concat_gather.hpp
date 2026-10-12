@@ -82,6 +82,54 @@ void concat_gather(
                     std::move(staged));
             TSTORE(out_ptr + batch_begin, output_tile, kLogicalBatchElements);
         }
+    } else if constexpr (std::is_same_v<DType, __half> && DATA_DIM == 2 &&
+                         CONCAT_DIM == 1 && tM == 512 && gOM % 512 == 0 &&
+                         gIM > 0 && gIM <= 1073741824) {
+        constexpr uint32_t kLogicalBatchElements = 512;
+        constexpr uint32_t kPartElements = 64;
+        constexpr uint32_t kPartCount = 8;
+
+        const uint32_t in_rows = static_cast<uint32_t>(in_shape[0]);
+        const uint32_t in_cols = static_cast<uint32_t>(in_shape[1]);
+        const uint32_t out_rows = static_cast<uint32_t>(out_shape[0]);
+        const uint32_t out_cols = static_cast<uint32_t>(out_shape[1]);
+        const uint32_t input_elements = in_rows * in_cols;
+
+        for (uint32_t batch_begin = 0; batch_begin < static_cast<uint32_t>(gOM);
+             batch_begin += kLogicalBatchElements) {
+            ElementTile<DType, kLogicalBatchElements> domain;
+            auto logical_parts =
+                TPARTVIEW<kPartElements>(domain, kLogicalBatchElements);
+            TileArray<ElementTile<DType, kPartElements>, 1, kPartCount> staged;
+
+            for (uint32_t part = 0; part < logical_parts.size(); ++part) {
+                ElementTile<DType, kPartElements> gathered;
+                auto &output_elements = TPARTELEMENT(gathered);
+
+#pragma pto element for
+                for (uint32_t element = 0; element < kPartElements;
+                     ++element) {
+                    const uint32_t local_output_offset =
+                        batch_begin + logical_parts.logical_index(part, element);
+                    const uint32_t global =
+                        output_base_start + local_output_offset;
+                    const uint32_t row = (global / out_cols) % out_rows;
+                    const uint32_t col = global % out_cols;
+                    const uint32_t input_no = col / in_cols;
+                    const uint32_t element_index =
+                        input_no * input_elements + row * in_cols +
+                        (col % in_cols);
+                    output_elements[element] = in_ptr[element_index];
+                }
+
+                TMOV(staged[0][part], gathered);
+            }
+
+            ElementTile<DType, kLogicalBatchElements> output_tile =
+                TASSEMBLY<ElementTile<DType, kLogicalBatchElements>>(
+                    std::move(staged));
+            TSTORE(out_ptr + batch_begin, output_tile, kLogicalBatchElements);
+        }
     } else {
     constexpr int kFullTiles = gOM / tM;
     constexpr int kTailElements = gOM % tM;

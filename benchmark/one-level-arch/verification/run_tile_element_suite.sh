@@ -12,6 +12,7 @@ default_cases=(
     elementwise_atomic_histogram
     concat_gather_s32_original
     concat_gather_s32_alias_probe
+    concat_gather_f16_original
     group_count_s32_original
     group_count_s32_strong
     elementwise_if_for
@@ -29,6 +30,7 @@ elif (( $# == 2 )) && [[ $1 == --case ]] && \
         $2 == selected_radix_tile_element || $2 == generic_atomic_cfg_i32 || \
         $2 == elementwise_atomic_histogram || $2 == concat_gather_s32_original || \
         $2 == concat_gather_s32_alias_probe || \
+        $2 == concat_gather_f16_original || $2 == concat_gather_f16_alias_probe || \
         $2 == group_count_s32_original || $2 == group_count_s32_strong || \
         $2 == elementwise_if_for || $2 == elementwise_if_for_strong || \
         $2 == elementwise_masked_gather_scatter || \
@@ -38,7 +40,7 @@ elif (( $# == 2 )) && [[ $1 == --case ]] && \
         $2 == topk_boundaries* ]]; then
     cases=("$2")
 else
-    echo "usage: $0 [--case histogram_tile_element|selected_radix_tile_element|indexed_gather_tile_element|element_expression_chain|signed_element_expression|generic_predicated_cfg_i32|generic_typed_tile_cfg_i32|generic_atomic_cfg_i32|elementwise_atomic_histogram|concat_gather_s32_original|concat_gather_s32_alias_probe|group_count_s32_original|group_count_s32_strong|elementwise_if_for|elementwise_if_for_strong|elementwise_masked_gather_scatter|elementwise_masked_gather_scatter_strong|topk_boundaries[_0|_1|_2]]" >&2
+    echo "usage: $0 [--case histogram_tile_element|selected_radix_tile_element|indexed_gather_tile_element|element_expression_chain|signed_element_expression|generic_predicated_cfg_i32|generic_typed_tile_cfg_i32|generic_atomic_cfg_i32|elementwise_atomic_histogram|concat_gather_s32_original|concat_gather_s32_alias_probe|concat_gather_f16_original|concat_gather_f16_alias_probe|group_count_s32_original|group_count_s32_strong|elementwise_if_for|elementwise_if_for_strong|elementwise_masked_gather_scatter|elementwise_masked_gather_scatter_strong|topk_boundaries[_0|_1|_2]]" >&2
     exit 2
 fi
 
@@ -47,15 +49,18 @@ fi
 : "${LINX_RUNTIME_ROOT:?set LINX_RUNTIME_ROOT to a complete Linx musl toolchain root}"
 : "${API_INCLUDE:?set API_INCLUDE to the current Linx-TileOP-API include directory}"
 
-MODELS=${MODELS:-gfrun,gfsim}
+# Functional acceptance covers every default case. Timing runs remain an
+# explicit selection for cases supported by the separate timing work.
+MODELS=${MODELS:-gfrun}
 case "$MODELS" in
     gfrun|gfrun,gfsim) ;;
     *) echo "MODELS must be gfrun or gfrun,gfsim" >&2; exit 2 ;;
 esac
 for case_name in "${cases[@]}"; do
-    if [[ "$case_name" == elementwise_masked_gather_scatter* &&
+    if [[ ( "$case_name" == elementwise_masked_gather_scatter* ||
+            "$case_name" == concat_gather_f16_* ) &&
           "$MODELS" != gfrun ]]; then
-        echo "$case_name is an FP32 functional case and requires MODELS=gfrun" >&2
+        echo "$case_name is a functional-only case and requires MODELS=gfrun" >&2
         exit 2
     fi
 done
@@ -147,6 +152,8 @@ run_case() {
           "$case_name" == elementwise_atomic_histogram ||
           "$case_name" == concat_gather_s32_original ||
           "$case_name" == concat_gather_s32_alias_probe ||
+          "$case_name" == concat_gather_f16_original ||
+          "$case_name" == concat_gather_f16_alias_probe ||
           "$case_name" == group_count_s32_original ||
           "$case_name" == group_count_s32_strong ||
           "$case_name" == elementwise_if_for ||
@@ -177,6 +184,8 @@ run_case() {
           "$case_name" == elementwise_atomic_histogram ||
           "$case_name" == concat_gather_s32_original ||
           "$case_name" == concat_gather_s32_alias_probe ||
+          "$case_name" == concat_gather_f16_original ||
+          "$case_name" == concat_gather_f16_alias_probe ||
           "$case_name" == group_count_s32_original ||
           "$case_name" == group_count_s32_strong ||
           "$case_name" == elementwise_if_for ||
