@@ -9,6 +9,8 @@
 [JSON 清单](pto_element_migration.json) 仍以 21 条原应用路径和 4 个多线程
 wrapper 为分母。`verified_profile` 只表示其证据所列源码和配置通过；未覆盖的
 原 dtype、shape、算法路径和 wrapper 不能由 foundation 用例推断完成。
+`verified_functional_profile` 单独记录用户明确接受的 FP32
+pto-spec/compiler/gfrun 范围，不计入双模型 verified_profile。
 
 ## 已验证的范围
 
@@ -34,6 +36,21 @@ wrapper 为分母。`verified_profile` 只表示其证据所列源码和配置�
 库存更新本身是随后独立的文档提交，不修改已验证的 kernel、compiler 或 model。
 早期 P1a/P1b foundation 证据保留为历史记录，不代替本次 generic 验证。
 
+## FP32 functional 闭环
+
+原 `elementwise_if_for` 的三个512-byte零缓冲区、128个FP32元素和完整
+TileOp→element if→TileOp kernel，以及独立强化用例，均已通过最终
+compiler/正式API构建、IR/原生指令检查和 gfrun 精确 raw-bit golden。
+强化用例包含两个分支、signed-zero、相消和64-byte输出 guards；输入保持不变。
+冻结证据为 `20261012-fp32-functional-original-final` 和
+`20261012-fp32-functional-strong-final`。执行输入全部 clean：
+compiler `a616844`、benchmark `d7e0f63`、gfrun `965d5fd2`、API `b95ac2ef`。
+
+FP32 本轮验收按用户要求为 pto-spec + compiler + gfrun；runner 显式
+`MODELS=gfrun`，选择记录在 immutable provenance。gfsim 的物理字节
+definedness、masked TNEG 和 raw-part TMOV 在独立 timing PR 中继续，
+functional PASS 不代表 gfsim parity。其余应用/wrapper 仍按原范围跟踪。
+
 ## 当前缺口
 
 - 其余 18 条原应用路径和 4 个多线程 wrapper 仍待完整迁移与双模型验证。
@@ -43,7 +60,8 @@ wrapper 为分母。`verified_profile` 只表示其证据所列源码和配置�
 - 编译器当前物理 element profile 为 32 个 S32/U32 元素，已支持普通 CFG 的
   if/continue/PHI、readonly indexed i32 gather、证明独立的 unit-stride i32
   scatter，以及对齐、非 volatile、System/Monotonic i32 atomic add。
-  varying 内层循环、FP32/FP16 与更宽物理 carrier、其他原子操作/ordering、
+  FP32 的32-element functional profile 已单独闭环；varying 内层循环、
+  FP16 与更宽物理 carrier、其他原子操作/ordering、
   可能重叠的普通 indexed 写入和 O0 typed spill 仍未闭合。
 - API 提供某 dtype 的存储/transport，不等于该 dtype 的 marked element loop
   已可执行。QLI 私有 histogram 汇编、稀疏 MLA 的 spill/标量索引阶段、动态
@@ -56,7 +74,8 @@ wrapper 为分母。`verified_profile` 只表示其证据所列源码和配置�
 2. 检查 CFG/SSA、predicate、typed byte offset 和物理指令，保留源码的
    element 内顺序、原始输入、输出、副作用、guards 和资源容量。
 3. 每个 kernel 和适用配置由指定 compiler 和正式安装 API 重新编译；
-   同一 ELF 分别在 gfrun/gfsim 执行，对照独立 golden。
+   按验收范围选择模型并记录 provenance，对照独立 golden；FP32 functional
+   范围使用 gfrun，双模型范围使用同一 ELF 在 gfrun/gfsim 执行。
 4. gfsim A3 为零，实际队列守恒；不通过资源/超时扩大、提前释放、替代
    reference-core 输出、finisher override 或改 golden 隐藏错误。
 5. 分别记录普通/原子 memory、dtype/shape 和多线程覆盖。超时、unsupported、
@@ -70,6 +89,7 @@ mnemonic 和缺失头文件的旧 driver 单独登记，不隐式恢复已退休
 - [NPUbench #202](https://github.com/PTO-ISA/SuperNPUBench/pull/202)
 - [LLVM #118](https://github.com/LinxISA/llvm-project/pull/118)
 - [TileOp API #249](https://github.com/LinxISA/Linx-TileOP-API/pull/249)
+- [FP32 gfrun #949](https://github.com/LinxISA/SuperScalarModel/pull/949)
 - [模型 #925](https://github.com/LinxISA/SuperScalarModel/pull/925)
 - [规格 #369](https://github.com/PTO-ISA/pto-spec/pull/369)
 - [集成 issue #370](https://github.com/PTO-ISA/pto-spec/issues/370)

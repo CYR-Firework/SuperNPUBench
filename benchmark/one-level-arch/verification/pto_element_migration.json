@@ -516,7 +516,7 @@
       "id": "elementwise_if_for",
       "source": "benchmark/one-level-arch/test/solution/tileop-test/vec/src/elementwise_if_for.cpp",
       "access_kind": "masked_arithmetic",
-      "status": "pending",
+      "status": "verified_functional_profile",
       "requirements": [
         "canonical_pto_element_for",
         "logical_element_arrays",
@@ -527,7 +527,63 @@
         "same_elf_gfsim",
         "zero_model_invariants"
       ],
-      "evidence": null
+      "evidence": {
+        "acceptance_scope": "bounded FP32 functional profile; no gfsim parity claim",
+        "spec_commit": "8f589b70085a37c70f210898b168aae634da5ac1",
+        "compiler_commit": "a6168443731fbc6c0c85b45513c70e511f72433c",
+        "benchmark_execution_commit": "d7e0f63a09190190d073938f48d0af5c2acd23fd",
+        "model_commit": "965d5fd2e87f6066de337593d03d0d80ed321838",
+        "api_commit": "b95ac2ef2b471205c8865944c00712081f2362ce",
+        "runs": [
+          {
+            "run_id": "20261012-fp32-functional-original-final",
+            "case": "elementwise_if_for",
+            "selected_models": [
+              "gfrun"
+            ],
+            "provenance_sha256": "f2c67e99269f4747a54f82862618fd6ccf431d08eedca25400f3323980775dab",
+            "elf_sha256": "91ed011cc167d83db8429268d951644cd31f8c30269569654def20961ebb4aea",
+            "manifest_sha256": "fa2d3e21f20e535d898598c241b84a9f531d4f2c9957e7f4720c6a06a4cd033c",
+            "segments": [
+              "lhs_storage",
+              "rhs_storage",
+              "out_storage"
+            ],
+            "comparison": "exact_raw_bytes"
+          },
+          {
+            "run_id": "20261012-fp32-functional-strong-final",
+            "case": "elementwise_if_for_strong",
+            "selected_models": [
+              "gfrun"
+            ],
+            "provenance_sha256": "e49c7aff158ff9223562dfbd836bc6f38974381f2385ca499fb205e26729f9a9",
+            "elf_sha256": "38072e1952ccc4ff262414acda5b8d758c40a254cbae41e740b47377a53549ee",
+            "manifest_sha256": "59821073e0038480a34d4f92fcac0ca4e1006edaa77b87f75eaaedf0a175fed8",
+            "segments": [
+              "lhs_storage",
+              "rhs_storage",
+              "out_storage"
+            ],
+            "comparison": "exact_raw_bytes"
+          }
+        ],
+        "compiler_focused_tests": "21/21 PASS",
+        "functional_model_affected_tests": "3/3 PASS",
+        "remaining_timing_gaps": [
+          "physical_byte_definedness",
+          "masked_TNEG_admission",
+          "raw_part_TMOV_transport",
+          "same_ELF_gfsim_validation"
+        ]
+      },
+      "functional_acceptance": [
+        "pto_spec",
+        "compiler",
+        "official_tileop_api",
+        "gfrun"
+      ],
+      "timing_status": "pending_separate_pr"
     },
     {
       "id": "elementwise_atomic_histogram",
@@ -680,7 +736,7 @@
       "gfsim_queue_destroyed": 1593
     }
   },
-  "compiler_architecture_status": "Generic CFG/LLVM SSA supports 32-element S32/U32 physical carriers, nested if/continue and edge-mask PHIs, official TileOp -> element -> TileOp views, B32 indices -> B64 byte offsets, readonly indexed i32 gather, proven injective ordinary i32 scatter, and nonvolatile aligned System/Monotonic i32 atomic add. Exact verified profiles are recorded independently; varying inner loops, FP32/FP16 or wider physical carriers, O0 typed spills and remaining original workloads/wrappers are pending.",
+  "compiler_architecture_status": "Generic CFG/LLVM SSA supports 32-element S32/U32 physical carriers, nested if/continue and edge-mask PHIs, official TileOp -> element -> TileOp views, B32 indices -> B64 byte offsets, readonly indexed i32 gather, proven injective ordinary i32 scatter, and nonvolatile aligned System/Monotonic i32 atomic add. Exact verified profiles are recorded independently; varying inner loops, FP32 timing qualification, FP16 or wider physical carriers, O0 typed spills and remaining original workloads/wrappers are pending. Bounded 32-element FP32 ordinary optimized non-fenv Tile-view arithmetic/compare/select/fneg is independently functional-verified with pto-spec/compiler/gfrun; see elementwise_if_for evidence.",
   "generic_cfg_verified_profiles": {
     "compiler": "482b4207e88adf312fd1b1a8a567b83f5a4e207b",
     "benchmark": "9076bd082544e273cdb93f39675df42510d8c071",
