@@ -172,8 +172,10 @@ def main() -> int:
         "compiler_version": run(str(args.compiler_bin / "clang++"), "--version"),
         "artifacts": {
             "elf": {"path": str(args.elf), "sha256": sha256_file(args.elf)},
-            "clang": sha256_file(args.compiler_bin / "clang-15"),
-            "lld": sha256_file(args.compiler_bin / "lld"),
+            # Hash the invoked driver names; frozen toolchains need not retain
+            # the build tree's versioned clang-15 alias.
+            "clang": sha256_file(args.compiler_bin / "clang++"),
+            "lld": sha256_file(args.compiler_bin / "ld.lld"),
             "llvm_objdump": sha256_file(args.compiler_bin / "llvm-objdump"),
             "gfrun": sha256_file(args.gfrun),
             **({"gfsim": sha256_file(args.gfsim)}

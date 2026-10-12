@@ -4,11 +4,16 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
+import tempfile
+from unittest import mock
 import sys
 import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import write_provenance
 from write_provenance import verify_immutable_inputs
 
 
@@ -40,6 +45,51 @@ def sample_identity() -> dict[str, object]:
 
 
 class InputProvenanceTest(unittest.TestCase):
+    def test_hashes_invoked_compiler_driver_without_versioned_filename(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            compiler = root / "bin"
+            compiler.mkdir()
+            (compiler / "clang").write_bytes(b"actual compiler")
+            (compiler / "clang++").symlink_to("clang")
+            (compiler / "lld").write_bytes(b"linker")
+            (compiler / "ld.lld").symlink_to("lld")
+            (compiler / "llvm-objdump").write_bytes(b"objdump")
+            for name in ("libc.a", "libc++.a", "libc++abi.a", "libunwind.a"):
+                p = root / "sysroot/usr/lib" / name
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_bytes(b"runtime")
+            for name in ("api/common/pto_tileop.hpp",
+                         "resource/include/tileop-api/common/pto_tileop.hpp",
+                         "golden/expected.bin", "test.elf", "gfrun"):
+                p = root / name
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_bytes(b"fixture")
+            artifact = root / "artifacts"
+            artifact.mkdir()
+            output = root / "provenance.json"
+            argv = ["write_provenance.py", "--out", str(output),
+                    "--elf", str(root / "test.elf"), "--compiler-bin", str(compiler),
+                    "--model-root", str(root), "--runtime-root", str(root),
+                    "--api-include", str(root / "api"), "--bench-root", str(root),
+                    "--golden-dir", str(root / "golden"), "--target-triple", "linx64v5",
+                    "--sysroot", str(root / "sysroot"),
+                    "--resource-dir", str(root / "resource"),
+                    "--artifact-dir", str(artifact), "--dump-range", "0x1000:4",
+                    "--run-exit-status", "125", "--models", "gfrun",
+                    "--gfrun", str(root / "gfrun")]
+            for decoy in (False, True):
+                with self.subTest(versioned_decoy=decoy):
+                    if decoy:
+                        (compiler / "clang-15").write_bytes(b"different unused compiler")
+                    with mock.patch.object(sys, "argv", argv), \
+                            mock.patch.object(write_provenance, "run", return_value=str(root)), \
+                            mock.patch.object(write_provenance, "git_identity", return_value={}):
+                        self.assertEqual(write_provenance.main(), 0)
+                    data = json.loads(output.read_text())
+                    self.assertEqual(data["artifacts"]["clang"],
+                                     hashlib.sha256(b"actual compiler").hexdigest())
+
     def test_unchanged_inputs_accept_growing_evidence_and_status(self) -> None:
         before = sample_identity()
         after = copy.deepcopy(before)
