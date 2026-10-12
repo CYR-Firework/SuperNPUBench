@@ -77,9 +77,25 @@ gfrun `965d5fd2`。独立审计验证54项SHA256、全部5/7段原始内存以�
 functional profile；其余16条原应用及4个wrapper仍未闭环。API后续修复和
 整数B.ASSEMBLE工作使用独立提交/证据，不混入上述冻结版本。
 
+## 2026-10-13 gfrun 原始配置补充证据
+
+冻结的 `20261012-functional-integer-final-*` 共17例通过，审计435项hash。
+其中原 `elementwise_atomic_histogram`、原 `group_count<16,8,32>` 及其独立
+重复调用/别名强化例已获得 functional profile。concat 的原 S32 配置
+（128000输入/输出、512元素批次）及独立别名例通过；FP16 配置仍在验证，
+因此 concat 整条应用保持 pending。
+
+这些运行的输入为 compiler `8bc0f201`、API `07cc52dd`、gfrun `30e90b74`、
+benchmark `81443975`，精确哈希与路径见 JSON。所有运行只选择 gfrun。
+原777元素TopK另有 `20261012-functional-topk777-final` 的9段内存通过证据。
+本轮使用单模拟PE与SDK的mask1111，不能据此声称四PE wrapper已通过。
+
+目前7条应用有对应的精确已验证profile，另有concat S32子配置；其余原始
+类型/规模和4个wrapper仍保留在分母内。历史双模型结果保持原运行含义。
+
 ## 当前缺口
 
-- 其余16条原应用路径和4个多线程 wrapper 仍待完整迁移与验证；
+- 其余未完成的原应用配置和4个多线程 wrapper 仍待完整迁移与验证；
   已完成 functional 验证的 FP32 应用仅剩独立 timing 跟进。
   特别是原 gather 的 rank-2 FP32 行索引/广播和四个配置，不能由 U32
   indexed-gather foundation 替代。concat 的 S32/FP16、512 元素及完整数据容量

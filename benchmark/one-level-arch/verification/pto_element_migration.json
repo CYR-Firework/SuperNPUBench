@@ -80,7 +80,41 @@
         "same_elf_gfrun",
         "zero_model_invariants"
       ],
-      "evidence": null,
+      "evidence": {
+        "acceptance_scope": "exact original and separately named strong/alias gfrun profiles",
+        "spec_commit": "8f589b70085a37c70f210898b168aae634da5ac1",
+        "repositories": {
+          "benchmark": "814439750ee53221315282a936dc64529348cb0f",
+          "compiler": "8bc0f201b8cf3fc22acf3b17aba547ab99382822",
+          "model": "30e90b74ae622d6aba9b971acd6b85786d4dece9",
+          "tileop_api": "07cc52dd30ba68587db10f0a2b9d6d8eb86c7c4c"
+        },
+        "runs": [
+          {
+            "case": "concat_gather_s32_original",
+            "artifact": "tile_element_suite/20261012-functional-integer-final-concat_gather_s32_original",
+            "content_id": "d671b3f35ad14c76938c8d68a81631bfe5f5e09a441b531548b19885807c2e6d",
+            "elf_sha256": "d1fc25692980eadcfd0482a3f5dfbc2d8514c9231a511ebc5b9fbe74c2648a5a",
+            "provenance_sha256": "7d27b1afd8a11d41a2f7b59394563d907ec1fcccef87e46bc8cec2c75868d481",
+            "verified_hash_count": 26,
+            "selected_models": [
+              "gfrun"
+            ]
+          },
+          {
+            "case": "concat_gather_s32_alias_probe",
+            "artifact": "tile_element_suite/20261012-functional-integer-final-concat_gather_s32_alias_probe",
+            "content_id": "b3970ffa3683991e40b114af0e078ff87bbdf6193480120194c58daac207b719",
+            "elf_sha256": "e4a77ba7cf0702fae4f5841fed3437e49e6a993745d80ee32fdb52a55efcbcd6",
+            "provenance_sha256": "5f21736941ea4311a374bbfe814047c29a79ae100437247d951f16b2edb92793",
+            "verified_hash_count": 26,
+            "selected_models": [
+              "gfrun"
+            ]
+          }
+        ],
+        "execution_profile": "one simulated PE with SDK mask1111; not four-PE collective proof"
+      },
       "configuration_source": "benchmark/one-level-arch/test/kernel/concat/compile.all",
       "configurations": [
         {
@@ -98,7 +132,7 @@
           ],
           "data_dim": 2,
           "concat_dim": 1,
-          "migration_status": "pending"
+          "migration_status": "verified_functional_profile"
         },
         {
           "dtype": "FP16",
@@ -117,6 +151,11 @@
           "concat_dim": 1,
           "migration_status": "pending"
         }
+      ],
+      "timing_status": "pending_separate_pr",
+      "remaining_profiles": [
+        "original FP16 configuration",
+        "multi-thread wrapper"
       ]
     },
     {
@@ -240,7 +279,7 @@
       "id": "group_count_aux_fi",
       "source": "benchmark/one-level-arch/kernels/single_thread/deepseek/moe/group_count_aux_fi.hpp",
       "access_kind": "histogram_reduction",
-      "status": "pending",
+      "status": "verified_functional_profile",
       "requirements": [
         "canonical_pto_element_for",
         "logical_element_arrays",
@@ -250,7 +289,54 @@
         "same_elf_gfrun",
         "zero_model_invariants"
       ],
-      "evidence": null
+      "evidence": {
+        "acceptance_scope": "exact original and separately named strong/alias gfrun profiles",
+        "spec_commit": "8f589b70085a37c70f210898b168aae634da5ac1",
+        "repositories": {
+          "benchmark": "814439750ee53221315282a936dc64529348cb0f",
+          "compiler": "8bc0f201b8cf3fc22acf3b17aba547ab99382822",
+          "model": "30e90b74ae622d6aba9b971acd6b85786d4dece9",
+          "tileop_api": "07cc52dd30ba68587db10f0a2b9d6d8eb86c7c4c"
+        },
+        "runs": [
+          {
+            "case": "group_count_s32_original",
+            "artifact": "tile_element_suite/20261012-functional-integer-final-group_count_s32_original",
+            "content_id": "48ec04b2f9008f0928b75f55aadc3372960c52061e53b1153bf6128929ff2686",
+            "elf_sha256": "d4bea5a787793f2ba67256c3ab78efaeacdb71ec33dfb1dd228bc5a98e430678",
+            "provenance_sha256": "9fd706dca46196970d5bfd145e3a280420ad029e1902f6fad8fd27467484e629",
+            "verified_hash_count": 24,
+            "selected_models": [
+              "gfrun"
+            ]
+          },
+          {
+            "case": "group_count_s32_strong",
+            "artifact": "tile_element_suite/20261012-functional-integer-final-group_count_s32_strong",
+            "content_id": "f3e730784be459f1fdb1afb7f7bc67afb1b3871815b33073c2aa978b0c4fac00",
+            "elf_sha256": "c1fce947aef445a1dab37f00e2a80602985717e17f226fcefe69a0c0e1bbdc84",
+            "provenance_sha256": "70a0554cc50bd7b4d7c9742dff81bcb151a1b794b02d69b2f71c27788fd3caf4",
+            "verified_hash_count": 25,
+            "selected_models": [
+              "gfrun"
+            ]
+          }
+        ],
+        "execution_profile": "one simulated PE with SDK mask1111; not four-PE collective proof"
+      },
+      "timing_status": "pending_separate_pr",
+      "validated_profile": {
+        "dtype": "S32",
+        "template_arguments": [
+          16,
+          8,
+          32
+        ],
+        "input_elements": 256,
+        "used_elements": 128,
+        "output_elements": 64,
+        "bins": 32
+      }
     },
     {
       "id": "matmul_mx_scale_access",
@@ -376,7 +462,6 @@
         "native_tile_lowering",
         "independent_goldens",
         "same_elf_gfrun",
-        "same_elf_gfsim",
         "zero_model_invariants"
       ],
       "evidence": {
@@ -415,7 +500,10 @@
           0
         ]
       },
-      "closure_scope": "Only the recorded source/configurations; does not close other inventory entries or multithread wrappers."
+      "closure_scope": "Only the recorded source/configurations; does not close other inventory entries or multithread wrappers.",
+      "deferred_requirements": [
+        "same_elf_gfsim"
+      ]
     },
     {
       "id": "histogram_tile_element",
@@ -429,7 +517,6 @@
         "native_tile_lowering",
         "independent_goldens",
         "same_elf_gfrun",
-        "same_elf_gfsim",
         "zero_model_invariants"
       ],
       "evidence": {
@@ -455,7 +542,10 @@
         "input_elements": 263,
         "histogram_bins": 256
       },
-      "closure_scope": "Only the recorded source/configurations; does not close other inventory entries or multithread wrappers."
+      "closure_scope": "Only the recorded source/configurations; does not close other inventory entries or multithread wrappers.",
+      "deferred_requirements": [
+        "same_elf_gfsim"
+      ]
     },
     {
       "id": "selected_radix_tile_element",
@@ -469,7 +559,6 @@
         "native_tile_lowering",
         "independent_goldens",
         "same_elf_gfrun",
-        "same_elf_gfsim",
         "zero_model_invariants"
       ],
       "evidence": {
@@ -495,7 +584,10 @@
         "input_elements": 263,
         "histogram_bins": 256
       },
-      "closure_scope": "Only the recorded source/configurations; does not close other inventory entries or multithread wrappers."
+      "closure_scope": "Only the recorded source/configurations; does not close other inventory entries or multithread wrappers.",
+      "deferred_requirements": [
+        "same_elf_gfsim"
+      ]
     },
     {
       "id": "elementwise_if_for",
@@ -509,7 +601,6 @@
         "native_tile_lowering",
         "independent_goldens",
         "same_elf_gfrun",
-        "same_elf_gfsim",
         "zero_model_invariants"
       ],
       "evidence": {
@@ -568,13 +659,16 @@
         "official_tileop_api",
         "gfrun"
       ],
-      "timing_status": "pending_separate_pr"
+      "timing_status": "pending_separate_pr",
+      "deferred_requirements": [
+        "same_elf_gfsim"
+      ]
     },
     {
       "id": "elementwise_atomic_histogram",
       "source": "benchmark/one-level-arch/test/solution/tileop-test/vec/src/elementwise_atomic_histogram.cpp",
       "access_kind": "atomic_histogram",
-      "status": "pending",
+      "status": "verified_functional_profile",
       "requirements": [
         "canonical_pto_element_for",
         "logical_element_arrays",
@@ -584,7 +678,31 @@
         "same_elf_gfrun",
         "zero_model_invariants"
       ],
-      "evidence": null
+      "evidence": {
+        "acceptance_scope": "exact original and separately named strong/alias gfrun profiles",
+        "spec_commit": "8f589b70085a37c70f210898b168aae634da5ac1",
+        "repositories": {
+          "benchmark": "814439750ee53221315282a936dc64529348cb0f",
+          "compiler": "8bc0f201b8cf3fc22acf3b17aba547ab99382822",
+          "model": "30e90b74ae622d6aba9b971acd6b85786d4dece9",
+          "tileop_api": "07cc52dd30ba68587db10f0a2b9d6d8eb86c7c4c"
+        },
+        "runs": [
+          {
+            "case": "elementwise_atomic_histogram",
+            "artifact": "tile_element_suite/20261012-functional-integer-final-elementwise_atomic_histogram",
+            "content_id": "955ed2852e61d1c4c35438b9d1df90858c0337c847f5efa566e2af3c9abfa9b9",
+            "elf_sha256": "3caf6d3b4c72d7ec8a6e6ef12bb9b4a1c73908f090176f1f9ace4c5d26bf71ab",
+            "provenance_sha256": "f100292f6a9a79810233b6c6dc613109aed32d1ef7636ec57fc1089d2722b536",
+            "verified_hash_count": 27,
+            "selected_models": [
+              "gfrun"
+            ]
+          }
+        ],
+        "execution_profile": "one simulated PE with SDK mask1111; not four-PE collective proof"
+      },
+      "timing_status": "pending_separate_pr"
     },
     {
       "id": "elementwise_masked_gather_scatter",
@@ -598,7 +716,6 @@
         "native_tile_lowering",
         "independent_goldens",
         "same_elf_gfrun",
-        "same_elf_gfsim",
         "zero_model_invariants"
       ],
       "evidence": {
@@ -679,7 +796,10 @@
         "intra_element_order": "source",
         "comparison": "exact_raw_bytes",
         "duplicate_destinations": "strong case writes identical payloads to each repeated destination"
-      }
+      },
+      "deferred_requirements": [
+        "same_elf_gfsim"
+      ]
     }
   ],
   "multi_thread_wrappers": [
@@ -893,7 +1013,7 @@
     }
   },
   "current_acceptance_policy": {
-    "updated": "2026-10-12",
+    "updated": "2026-10-13",
     "authority": "explicit user direction: ensure all gfrun passes; gfsim belongs to a later separate PR",
     "models": [
       "gfrun"
