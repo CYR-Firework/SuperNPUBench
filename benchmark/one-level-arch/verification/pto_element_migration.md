@@ -1,5 +1,12 @@
 # PTO element for 全量迁移与验证
 
+
+2026-10-12 用户更新：本次所有类型、原始应用配置和四个多线程 wrapper 均以
+pto-spec + public API + compiler + gfrun 为验收范围。执行时显式使用
+`MODELS=gfrun`；gfsim 留到后续独立 PR，不阻塞本轮 functional 闭环。
+原始规模、分配、别名语义、独立 golden 和不可变 provenance 要求保留。
+历史双模型证据按原输入保留，不改写为新的执行结果。
+
 目标是把活跃的稀疏、histogram、gather、scatter 和不规则访问 workload 写成
 `#pragma pto element for` 标记的普通 C++ 元素循环。正式 TileOp API 负责
 存储和 view，编译器沿 Clang CFG、LLVM SSA 和 edge mask 处理控制流与中间值。
@@ -9,8 +16,8 @@
 [JSON 清单](pto_element_migration.json) 仍以 21 条原应用路径和 4 个多线程
 wrapper 为分母。`verified_profile` 只表示其证据所列源码和配置通过；未覆盖的
 原 dtype、shape、算法路径和 wrapper 不能由 foundation 用例推断完成。
-`verified_functional_profile` 单独记录用户明确接受的 FP32
-pto-spec/compiler/gfrun 范围，不计入双模型 verified_profile。
+`verified_functional_profile` 记录本轮 pto-spec/compiler/API/gfrun 范围；
+它不表示已取得 gfsim timing 证据。现有 FP32 functional 记录保持原证据。
 
 ## 已验证的范围
 
@@ -95,9 +102,9 @@ functional profile；其余16条原应用及4个wrapper仍未闭环。API后续�
 2. 检查 CFG/SSA、predicate、typed byte offset 和物理指令，保留源码的
    element 内顺序、原始输入、输出、副作用、guards 和资源容量。
 3. 每个 kernel 和适用配置由指定 compiler 和正式安装 API 重新编译；
-   按验收范围选择模型并记录 provenance，对照独立 golden；FP32 functional
-   范围使用 gfrun，双模型范围使用同一 ELF 在 gfrun/gfsim 执行。
-4. gfsim A3 为零，实际队列守恒；不通过资源/超时扩大、提前释放、替代
+   所有本轮配置显式选择 gfrun 并记录 provenance，对照独立 golden；
+   后续 timing PR 再使用同一 ELF 追加 gfsim 验证。
+4. 后续 timing PR 要求 gfsim A3 为零、实际队列守恒；不通过资源/超时扩大、提前释放、替代
    reference-core 输出、finisher override 或改 golden 隐藏错误。
 5. 分别记录普通/原子 memory、dtype/shape 和多线程覆盖。超时、unsupported、
    断言或缺少结果都不能计为通过。

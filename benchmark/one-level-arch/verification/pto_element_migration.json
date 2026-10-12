@@ -15,7 +15,6 @@
         "native_tile_lowering",
         "independent_goldens",
         "same_elf_gfrun",
-        "same_elf_gfsim",
         "zero_model_invariants"
       ],
       "evidence": null,
@@ -79,7 +78,6 @@
         "native_tile_lowering",
         "independent_goldens",
         "same_elf_gfrun",
-        "same_elf_gfsim",
         "zero_model_invariants"
       ],
       "evidence": null,
@@ -133,7 +131,6 @@
         "native_tile_lowering",
         "independent_goldens",
         "same_elf_gfrun",
-        "same_elf_gfsim",
         "zero_model_invariants"
       ],
       "evidence": null,
@@ -187,7 +184,6 @@
         "native_tile_lowering",
         "independent_goldens",
         "same_elf_gfrun",
-        "same_elf_gfsim",
         "zero_model_invariants"
       ],
       "evidence": null
@@ -204,7 +200,6 @@
         "native_tile_lowering",
         "independent_goldens",
         "same_elf_gfrun",
-        "same_elf_gfsim",
         "zero_model_invariants"
       ],
       "evidence": null
@@ -221,7 +216,6 @@
         "native_tile_lowering",
         "independent_goldens",
         "same_elf_gfrun",
-        "same_elf_gfsim",
         "zero_model_invariants"
       ],
       "evidence": null
@@ -238,7 +232,6 @@
         "native_tile_lowering",
         "independent_goldens",
         "same_elf_gfrun",
-        "same_elf_gfsim",
         "zero_model_invariants"
       ],
       "evidence": null
@@ -255,7 +248,6 @@
         "native_tile_lowering",
         "independent_goldens",
         "same_elf_gfrun",
-        "same_elf_gfsim",
         "zero_model_invariants"
       ],
       "evidence": null
@@ -272,7 +264,6 @@
         "native_tile_lowering",
         "independent_goldens",
         "same_elf_gfrun",
-        "same_elf_gfsim",
         "zero_model_invariants"
       ],
       "evidence": null
@@ -289,7 +280,6 @@
         "native_tile_lowering",
         "independent_goldens",
         "same_elf_gfrun",
-        "same_elf_gfsim",
         "zero_model_invariants"
       ],
       "evidence": null
@@ -306,7 +296,6 @@
         "native_tile_lowering",
         "independent_goldens",
         "same_elf_gfrun",
-        "same_elf_gfsim",
         "zero_model_invariants"
       ],
       "evidence": null
@@ -323,7 +312,6 @@
         "native_tile_lowering",
         "independent_goldens",
         "same_elf_gfrun",
-        "same_elf_gfsim",
         "zero_model_invariants"
       ],
       "evidence": null
@@ -340,7 +328,6 @@
         "native_tile_lowering",
         "independent_goldens",
         "same_elf_gfrun",
-        "same_elf_gfsim",
         "zero_model_invariants"
       ],
       "evidence": null
@@ -357,7 +344,6 @@
         "native_tile_lowering",
         "independent_goldens",
         "same_elf_gfrun",
-        "same_elf_gfsim",
         "zero_model_invariants"
       ],
       "evidence": null
@@ -374,7 +360,6 @@
         "native_tile_lowering",
         "independent_goldens",
         "same_elf_gfrun",
-        "same_elf_gfsim",
         "zero_model_invariants"
       ],
       "evidence": null
@@ -597,7 +582,6 @@
         "native_tile_lowering",
         "independent_goldens",
         "same_elf_gfrun",
-        "same_elf_gfsim",
         "zero_model_invariants"
       ],
       "evidence": null
@@ -907,5 +891,23 @@
         "does_not_close_other_application_entries": true
       }
     }
+  },
+  "current_acceptance_policy": {
+    "updated": "2026-10-12",
+    "authority": "explicit user direction: ensure all gfrun passes; gfsim belongs to a later separate PR",
+    "models": [
+      "gfrun"
+    ],
+    "applies_to": "all original application configurations, expression/type profiles and four multithread wrappers",
+    "required": [
+      "owning_spec",
+      "public_api",
+      "native_compiler_ir_object_elf",
+      "independent_golden",
+      "same_elf_gfrun",
+      "immutable_provenance"
+    ],
+    "timing_status": "deferred to separate PR; existing gfsim diagnostics are not functional acceptance blockers",
+    "historical_evidence": "preserve prior dual-model evidence with its exact original inputs"
   }
 }
