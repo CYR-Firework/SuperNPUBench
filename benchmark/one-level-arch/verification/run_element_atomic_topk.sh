@@ -1,6 +1,40 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+validate_models() {
+    case "$1" in
+        gfrun|gfrun,gfsim) return 0 ;;
+        *) echo "MODELS must be gfrun or gfrun,gfsim" >&2; return 2 ;;
+    esac
+}
+
+require_selected_models() {
+    local selected=$1
+    local selected_gfrun=$2
+    local selected_gfsim=$3
+    if [[ ! -e "$selected_gfrun" ]]; then
+        echo "missing selected functional model: $selected_gfrun" >&2
+        return 1
+    fi
+    if [[ "$selected" == gfrun,gfsim && ! -e "$selected_gfsim" ]]; then
+        echo "missing selected timing model: $selected_gfsim" >&2
+        return 1
+    fi
+}
+
+if [[ ${1:-} == --self-test-model-selection ]]; then
+    tmp_dir=$(mktemp -d)
+    trap 'rm -rf "$tmp_dir"' EXIT
+    : > "$tmp_dir/gfrun"
+    validate_models gfrun
+    require_selected_models gfrun "$tmp_dir/gfrun" "$tmp_dir/missing-gfsim"
+    ! require_selected_models gfrun "$tmp_dir/missing-gfrun" "$tmp_dir/missing-gfsim"
+    ! require_selected_models gfrun,gfsim "$tmp_dir/gfrun" "$tmp_dir/missing-gfsim"
+    ! validate_models gfsim
+    echo "element_atomic_topk model selection self-test: PASS"
+    exit 0
+fi
+
 : "${COMPILER_DIR:?set COMPILER_DIR to the fresh Linx compiler bin directory}"
 : "${SSM:?set SSM to the SuperScalarModel checkout or build root}"
 : "${LINX_RUNTIME_ROOT:?set LINX_RUNTIME_ROOT to a complete Linx musl toolchain root}"
@@ -9,6 +43,8 @@ set -euo pipefail
 TARGET_TRIPLE=${TARGET_TRIPLE:-linx64v5-unknown-linux-musl}
 SYSROOT=${SYSROOT:-"$LINX_RUNTIME_ROOT/sysroot"}
 RESOURCE_DIR=${RESOURCE_DIR:-"$LINX_RUNTIME_ROOT/lib/clang/15.0.4"}
+MODELS=${MODELS:-gfrun,gfsim}
+validate_models "$MODELS"
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 bench_root=$(cd "$script_dir/.." && pwd)
@@ -22,7 +58,12 @@ else
 fi
 gfrun=${GFRUN:-"$SSM/bin/gfrun"}
 gfsim=${GFSIM:-"$SSM/bin/gfsim"}
+require_selected_models "$MODELS" "$gfrun" "$gfsim"
 
+if [[ -e "$artifact_dir" ]]; then
+    echo "artifact directory already exists: $artifact_dir" >&2
+    exit 1
+fi
 mkdir -p "$artifact_dir"
 mkdir -p "$bench_root/output"
 
@@ -78,9 +119,18 @@ dump_range=$(python3 "$case_dir/element_atomic_topk/compare_memory.py" \
     --golden "$artifact_dir/golden" --print-range)
 dump_base=${dump_range%%:*}
 
-for step in disassembly gfrun gfrun-memory gfsim gfsim-invariants gfsim-memory; do
+steps=(disassembly gfrun gfrun-memory)
+if [[ "$MODELS" == gfrun,gfsim ]]; then
+    steps+=(gfsim gfsim-invariants gfsim-memory)
+fi
+for step in "${steps[@]}"; do
     printf '%s\n' 125 > "$artifact_dir/$step.exit"
 done
+
+provenance_model_args=(--models "$MODELS" --gfrun "$gfrun")
+if [[ "$MODELS" == gfrun,gfsim ]]; then
+    provenance_model_args+=(--gfsim "$gfsim")
+fi
 
 write_final_provenance() {
     local run_status=$?
@@ -94,7 +144,7 @@ write_final_provenance() {
         --golden-dir "$artifact_dir/golden" --target-triple "$TARGET_TRIPLE" \
         --sysroot "$SYSROOT" --resource-dir "$RESOURCE_DIR" \
         --artifact-dir "$artifact_dir" --dump-range "$dump_range" \
-        --gfrun "$gfrun" --gfsim "$gfsim" \
+        "${provenance_model_args[@]}" \
         --run-exit-status "$run_status" \
         --verify-inputs-from "$artifact_dir/input-provenance.json" \
         > "$artifact_dir/provenance.log" 2>&1
@@ -139,7 +189,7 @@ python3 "$case_dir/element_atomic_topk/write_provenance.py" \
     --golden-dir "$artifact_dir/golden" --target-triple "$TARGET_TRIPLE" \
     --sysroot "$SYSROOT" --resource-dir "$RESOURCE_DIR" \
     --artifact-dir "$artifact_dir" --dump-range "$dump_range" \
-    --gfrun "$gfrun" --gfsim "$gfsim" --run-exit-status 125 \
+    "${provenance_model_args[@]}" --run-exit-status 125 \
     > "$artifact_dir/input-provenance.log" 2>&1
 
 set +e
@@ -170,46 +220,48 @@ if (( gfrun_memory_status != 0 )); then
     exit "$gfrun_memory_status"
 fi
 
-set +e
-"$gfsim" --pto059-execution-mask-dev \
-    -s core.threadCount=1 core.stdPeCount=1 bctrl.assemble_enable=true \
-    --dump-force \
-    --dump-memory "$dump_range:$artifact_dir/gfsim.mem" \
-    -f "$elf" \
-    > "$artifact_dir/gfsim.log" 2>&1
-gfsim_status=$?
-set -e
-printf '%s\n' "$gfsim_status" > "$artifact_dir/gfsim.exit"
-if (( gfsim_status != 0 )); then
-    exit "$gfsim_status"
-fi
-grep -Eq 'Total Cycles|total cycles|cycle_count' "$artifact_dir/gfsim.log"
-if grep -Eq 'invariants:.*stq_conservation=OK.*a3_tile_violation=0([[:space:]]|$)' \
-    "$artifact_dir/gfsim.log" &&
-    ! grep -Eq 'LOG_ERROR|ASSERTION FAILED|a3_tile_violation peId=' \
-        "$artifact_dir/gfsim.log"; then
-    printf '0\n' > "$artifact_dir/gfsim-invariants.exit"
-else
-    printf '1\n' > "$artifact_dir/gfsim-invariants.exit"
-    echo "gfsim architectural invariant check failed" >&2
-    exit 1
-fi
-printf '%s\n' \
-    'gfsim does not emit an R2 register line; exit status and the independently checked status memory segment establish completion without --test-finisher 1.' \
-    > "$artifact_dir/gfsim-r2-contract.txt"
-set +e
-python3 "$case_dir/element_atomic_topk/compare_memory.py" \
-    --symbols "$artifact_dir/element_atomic_topk.symbols" \
-    --golden "$artifact_dir/golden" \
-    --dump "$artifact_dir/gfsim.mem" --dump-base "$dump_base" \
-    > >(tee "$artifact_dir/gfsim-memory.log") 2>&1
-gfsim_memory_status=$?
-set -e
-printf '%s\n' "$gfsim_memory_status" > "$artifact_dir/gfsim-memory.exit"
-if (( gfsim_memory_status != 0 )); then
-    exit "$gfsim_memory_status"
+if [[ "$MODELS" == gfrun,gfsim ]]; then
+    set +e
+    "$gfsim" --pto059-execution-mask-dev \
+        -s core.threadCount=1 core.stdPeCount=1 bctrl.assemble_enable=true \
+        --dump-force \
+        --dump-memory "$dump_range:$artifact_dir/gfsim.mem" \
+        -f "$elf" \
+        > "$artifact_dir/gfsim.log" 2>&1
+    gfsim_status=$?
+    set -e
+    printf '%s\n' "$gfsim_status" > "$artifact_dir/gfsim.exit"
+    if (( gfsim_status != 0 )); then
+        exit "$gfsim_status"
+    fi
+    grep -Eq 'Total Cycles|total cycles|cycle_count' "$artifact_dir/gfsim.log"
+    if grep -Eq 'invariants:.*stq_conservation=OK.*a3_tile_violation=0([[:space:]]|$)' \
+        "$artifact_dir/gfsim.log" &&
+        ! grep -Eq 'LOG_ERROR|ASSERTION FAILED|a3_tile_violation peId=' \
+            "$artifact_dir/gfsim.log"; then
+        printf '0\n' > "$artifact_dir/gfsim-invariants.exit"
+    else
+        printf '1\n' > "$artifact_dir/gfsim-invariants.exit"
+        echo "gfsim architectural invariant check failed" >&2
+        exit 1
+    fi
+    printf '%s\n' \
+        'gfsim does not emit an R2 register line; exit status and the independently checked status memory segment establish completion without --test-finisher 1.' \
+        > "$artifact_dir/gfsim-r2-contract.txt"
+    set +e
+    python3 "$case_dir/element_atomic_topk/compare_memory.py" \
+        --symbols "$artifact_dir/element_atomic_topk.symbols" \
+        --golden "$artifact_dir/golden" \
+        --dump "$artifact_dir/gfsim.mem" --dump-base "$dump_base" \
+        > >(tee "$artifact_dir/gfsim-memory.log") 2>&1
+    gfsim_memory_status=$?
+    set -e
+    printf '%s\n' "$gfsim_memory_status" > "$artifact_dir/gfsim-memory.exit"
+    if (( gfsim_memory_status != 0 )); then
+        exit "$gfsim_memory_status"
+    fi
 fi
 
-echo "element_atomic_topk: PASS"
+echo "element_atomic_topk: PASS models=$MODELS"
 echo "ELF: $elf"
 echo "artifacts: $artifact_dir"
