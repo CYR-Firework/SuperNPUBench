@@ -7,4 +7,12 @@ else
 $(error Unsupported TESTCASE=$(TESTCASE); expected topk_tiled)
 endif
 
+ifeq ($(GFSIM),on)
+DEFINES += -DGFSIM
+endif
+
 include ../../../common/Makefile.common
+
+# The common rules do not track headers or mode flags. Order their clean
+# prerequisite before compiling, so -j4 also rebuilds when GFSIM changes.
+$(OBJ): clean
