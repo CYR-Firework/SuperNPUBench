@@ -769,7 +769,164 @@ def validate_concat_original(text: str, ir_text: str | None) -> None:
         raise CheckError("concat parent allocation no longer preserves 512 elements")
 
 
+def validate_original_f32(text: str, ir_text: str | None) -> None:
+    body = function_body(text, "elementwise_if_for")
+    lines = instruction_lines(body)
+    transport = [re.search(r"BSTART\.TLSU\s+(TLOAD|TMOV|TSTORE), FP32\b", line)
+                 for line in lines]
+    transport = [match.group(1) for match in transport if match]
+    if transport != ["TLOAD", "TLOAD", "TMOV", "TMOV", "TSTORE"]:
+        raise CheckError("FP32 original lost its exact TLOAD128/part-TMOV/TSTORE bridge")
+    if len(re.findall(r"\bB\.SUBVIEW\b", body)) != 2:
+        raise CheckError("FP32 original needs two raw logical part views")
+    if any(token not in body for token in ("ND2M32", "M322ND", "CUBE_M32")):
+        raise CheckError("FP32 original lost native typed transport")
+    if re.search(r"\bTCVT\b|BSTART\.TEPL\s+(TADDS|TSUBS), FP32\b", body):
+        raise CheckError("FP32 original introduced a numeric identity conversion")
+    # Inspect the mask of each actual operation's bundle, including FNEG when
+    # ordinary LLVM folds a +/- diamond into a sign select followed by FADD.
+    bundles = re.findall(r"BSTART\.TEPL\s+(TCMPS?|TADD|TSUB|TNEG), FP32\b"
+                         r"(.*?)(?=BSTART|\Z)", body, re.S)
+    counts = Counter(op for op, _bundle in bundles)
+    folded = counts == Counter({"TCMPS": 1, "TNEG": 1, "TADD": 1})
+    diamond = counts == Counter({"TCMPS": 1, "TADD": 1, "TSUB": 1})
+    if not (folded or diamond):
+        raise CheckError("FP32 original lost comparison or native add/subtract semantics")
+    for op, bundle in bundles:
+        if "ExecMaskPresent" not in bundle:
+            raise CheckError(f"FP32 original {op} lost its own execution mask")
+        if not re.search(r"C\.B\.DIMI\s+32,\s+->lb1", bundle):
+            raise CheckError(f"FP32 original {op} changed its 32-element domain")
+        if op == "TCMPS" and not re.search(
+                r"B\.DATR\s+NORM, DTYPE_NONE, Zero, byte0, GT, RNONE, nosat, 0, 1", bundle):
+            raise CheckError("FP32 original changed its native ordered comparison")
+    if len(re.findall(r"BSTART\.TEPL\s+TSEL, FP32\b", body)) != 1:
+        raise CheckError("FP32 original lost its raw-bit value merge")
+    if ir_text is None:
+        raise CheckError("FP32 original requires actual-source LLVM IR")
+    ir = ir_function_body(ir_text, "elementwise_if_for")
+    if re.search(r"extractelement|insertelement|@llvm\.vp\.|"
+                 r"@llvm\.linx\.experimental\.element\.(region|view)|"
+                 r"\b(fadd|fsub|fcmp|fneg|fpext|fptrunc|sitofp|uitofp|fptosi|fptoui)\b|"
+                 r"@llvm\.linx\.experimental\.ew\.tcvt", ir):
+        raise CheckError("FP32 original has residual scalar/region/conversion lowering")
+    definitions = dict(re.findall(r"^\s*(%[\w.]+) = ([^\n]+)", ir, re.M))
+
+    def calls(stem: str) -> list[tuple[str, str]]:
+        return [(value, expr) for value, expr in definitions.items()
+                if "@llvm.linx.experimental.ew." + stem + ".v32f32(" in expr]
+
+    compares = calls("tcmps.gpr.masked")
+    binary = calls("tbinary.gpr.masked")
+    negates = calls("tneg.gpr.masked")
+    selects = calls("tsel.gpr")
+    if len(compares) != 1 or len(selects) != 1:
+        raise CheckError("FP32 original lost its one comparison/one merge graph")
+    compare_value, compare_expr = compares[0]
+    compare = re.search(r"i64 32, i64 1, i64 1, i64 29, <32 x float> (%[\w.]+), "
+                        r"i64 (%[\w.]+|[0-9]+), i64 3, i64 (%[\w.]+|[0-9]+)\)", compare_expr)
+    if compare is None:
+        raise CheckError("FP32 original lost its masked ordered >0 comparison")
+    lhs, zero_bits, compare_mask = compare.groups()
+    # The scalar comparison constant must carry +0's bits, not a conversion.
+    if zero_bits != "0":
+        raw = re.fullmatch(r"zext i32 (%[\w.]+) to i64", definitions.get(zero_bits, ""))
+        bits = re.fullmatch(r"bitcast float (%[\w.]+) to i32", definitions.get(raw[1], "")) if raw else None
+        if not bits or definitions.get(bits[1]) != "freeze float 0.000000e+00":
+            raise CheckError("FP32 original changed the source comparison constant")
+
+    def mask(value: str, positive: bool, visiting: frozenset[str] = frozenset()) -> int:
+        if value == compare_value:
+            return 0xFFFFFFFF if positive else 0
+        if not value.startswith("%"):
+            return int(value) & 0xFFFFFFFFFFFFFFFF
+        if value in visiting:
+            raise CheckError("FP32 original has a cyclic predicate expression")
+        expr = definitions.get(value, "")
+        child_visiting = visiting | {value}
+        frozen = re.fullmatch(r"freeze i1 (true|false)", expr)
+        if frozen:
+            return int(frozen[1] == "true")
+        selected = re.fullmatch(r"select i1 (%[\w.]+), i64 ([0-9]+), i64 ([0-9]+)", expr)
+        if selected:
+            return int(selected[2] if mask(selected[1], positive, child_visiting) else selected[3])
+        binary_mask = re.fullmatch(r"(and|or|xor) i64 (%[\w.]+|[0-9]+), (%[\w.]+|[0-9]+)", expr)
+        if binary_mask:
+            op, left, right = binary_mask.groups()
+            a = mask(left, positive, child_visiting)
+            b = mask(right, positive, child_visiting)
+            return {"and": a & b, "or": a | b, "xor": a ^ b}[op]
+        raise CheckError("FP32 original has an unproved operation mask")
+
+    def require_mask(value: str, expected: tuple[int, int]) -> None:
+        if (mask(value, False), mask(value, True)) != expected:
+            raise CheckError("FP32 original changed an operation's active domain")
+
+    full = (0xFFFFFFFF, 0xFFFFFFFF)
+    require_mask(compare_mask, full)
+    select_value, select_expr = selects[0]
+    selected = re.search(r"i64 32, i64 1, i64 1, i64 29, i64 (%[\w.]+|[0-9]+), "
+                         r"i64 0, <32 x float> (%[\w.]+), <32 x float> (%[\w.]+)\)", select_expr)
+    if not selected:
+        raise CheckError("FP32 original lost F32 raw-bit merge typing")
+    predicate, true_value, false_value = selected.groups()
+    require_mask(predicate, (0, 0xFFFFFFFF))
+    binary_parts = []
+    for value, expr in binary:
+        operation = re.search(r"i64 32, i64 1, i64 1, i64 29, i64 ([01]), "
+                              r"<32 x float> (%[\w.]+), <32 x float> (%[\w.]+), "
+                              r"i64 (%[\w.]+|[0-9]+), i64 0, i64 0, i64 1\)", expr)
+        if not operation:
+            raise CheckError("FP32 original lost native FP32 binary typing")
+        binary_parts.append((value, *operation.groups()))
+    if folded:
+        if len(binary_parts) != 1 or len(negates) != 1:
+            raise CheckError("FP32 folded expression lost its exact TNEG/TSEL/TADD graph")
+        negate_value, negate_expr = negates[0]
+        negate = re.search(r"i64 32, i64 1, i64 1, i64 29, <32 x float> (%[\w.]+), "
+                           r"i64 (%[\w.]+|[0-9]+)\)", negate_expr)
+        result_value, opcode, add_lhs, add_rhs, add_mask = binary_parts[0]
+        if (not negate or true_value != negate[1] or false_value != negate_value or
+                opcode != "0" or (add_lhs, add_rhs) != (lhs, select_value)):
+            raise CheckError("FP32 folded expression changed negate/select/add dataflow")
+        rhs = negate[1]
+        require_mask(negate[2], full)
+        require_mask(add_mask, full)
+    else:
+        if len(binary_parts) != 2 or negates:
+            raise CheckError("FP32 diamond lost its exact FADD/FSUB graph")
+        by_opcode = {operation[1]: operation for operation in binary_parts}
+        if set(by_opcode) != {"0", "1"}:
+            raise CheckError("FP32 diamond lost one arithmetic arm")
+        summed, subtracted = by_opcode["0"], by_opcode["1"]
+        if (true_value, false_value) != (summed[0], subtracted[0]) or summed[2:4] != subtracted[2:4] or summed[2] != lhs:
+            raise CheckError("FP32 diamond changed add/subtract/merge dataflow")
+        rhs = summed[3]
+        require_mask(summed[4], (0, 0xFFFFFFFF))
+        require_mask(subtracted[4], (0xFFFFFFFF, 0))
+        result_value = select_value
+    # Both operands must be the actual corresponding raw Tile partition copies.
+    for value, source in ((lhs, "%lhs"), (rhs, "%rhs")):
+        transport_expr = definitions.get(value, "")
+        parent = re.search(r'asm sideeffect "BSTART\.TLSU TMOV,.*\(<128 x float> (%[\w.]+),', transport_expr)
+        if not parent or not re.search(r'asm sideeffect "BSTART\.TLSU TLOAD,.*\(ptr ' + re.escape(source) + ',', definitions.get(parent[1], "")):
+            raise CheckError("FP32 original substituted a source Tile partition")
+    # TSTORE consumes the computed result through its standard LCSSA publication.
+    stores = re.findall(r'call void asm sideeffect "BSTART\.TLSU TSTORE,[^\n]*', ir)
+    if len(stores) != 1:
+        raise CheckError("FP32 original lost its one Tile store")
+    stored = re.search(r'<32 x float> (%[\w.]+), i64 16, i32 1, i32 1, i32 32\)', stores[0])
+    if not stored:
+        raise CheckError("FP32 original changed its Tile store shape")
+    publication = definitions.get(stored[1], "")
+    if stored[1] != result_value and not re.search(r'phi <32 x float> \[ ' + re.escape(result_value) + r',', publication):
+        raise CheckError("FP32 original store no longer consumes its computed result")
+
+
 def validate(text: str, case: str, ir_text: str | None = None) -> None:
+    if case in ("elementwise_if_for", "elementwise_if_for_strong"):
+        validate_original_f32(text, ir_text)
+        return
     if case in ("group_count_s32_original", "group_count_s32_strong"):
         validate_group_count(text, ir_text)
         return
@@ -893,6 +1050,51 @@ def main() -> int:
     try:
         validate(text, args.case, ir_text)
         if args.self_test:
+            if args.case in ("elementwise_if_for", "elementwise_if_for_strong"):
+                body = function_body(text, "elementwise_if_for")
+                arithmetic = "TNEG" if "TNEG, FP32" in body else "TSUB"
+                for op in ("TCMPS", "TADD", arithmetic):
+                    rejected("missing " + op + " bundle mask", re.sub(
+                        rf"(BSTART\.TEPL\s+{op}, FP32.*?)(?=BSTART|\Z)",
+                        lambda match: match.group(0).replace("ExecMaskPresent", "NoExecMask"),
+                        text, count=1, flags=re.S), args.case, ir_text)
+                rejected("missing rawpart TMOV", text.replace("TMOV, FP32", "TMOV_REMOVED, FP32", 1), args.case, ir_text)
+                rejected("FP identity conversion", text.replace("TMOV, FP32", "TCVT, FP32", 1), args.case, ir_text)
+                rejected("add-zero identity transport", text.replace("TMOV, FP32", "TADDS, FP32", 1), args.case, ir_text)
+                rejected("wrong arithmetic dtype", text.replace(arithmetic + ", FP32", arithmetic + ", U32", 1), args.case, ir_text)
+                for marker in ("region", "view"):
+                    rejected("residual element " + marker, text, args.case, re.sub(
+                        r"(define[^\n]*elementwise_if_for[^\n]*\n)",
+                        rf"\1  call void @llvm.linx.experimental.element.{marker}()\n",
+                        ir_text or "", count=1))
+                rejected("scalar extract fallback", text, args.case, re.sub(
+                    r"(define[^\n]*elementwise_if_for[^\n]*\n)",
+                    r"\1  %bad = extractelement <32 x float> undef, i32 0\n", ir_text or "", count=1))
+                rejected("unmasked compare substitution", text, args.case,
+                         (ir_text or "").replace("tcmps.gpr.masked.v32f32", "tcmps.gpr.v32f32", 1))
+                rejected("unmasked arithmetic substitution", text, args.case,
+                         (ir_text or "").replace("tbinary.gpr.masked.v32f32", "tbinary.v32f32", 1))
+                rejected("wrong native comparison selector", text.replace("byte0, GT, RNONE", "byte0, LT, RNONE", 1), args.case, ir_text)
+                rejected("wrong comparison selector", text, args.case, re.sub(
+                    r"(@llvm\.linx\.experimental\.ew\.tcmps\.gpr\.masked\.v32f32[^\n]*), i64 3,",
+                    r"\1, i64 2,", ir_text or "", count=1))
+                rejected("empty arithmetic domain", text, args.case, re.sub(
+                    r"(@llvm\.linx\.experimental\.ew\.tbinary\.gpr\.masked\.v32f32[^\n]*), i64 %[\w.]+, i64 0, i64 0, i64 1\)",
+                    r"\1, i64 0, i64 0, i64 0, i64 1)", ir_text or "", count=1))
+                if arithmetic == "TNEG":
+                    rejected("unmasked negate substitution", text, args.case,
+                             (ir_text or "").replace("tneg.gpr.masked.v32f32", "tneg.v32f32", 1))
+                    rejected("wrong negate operand", text, args.case, re.sub(
+                        r"(@llvm\.linx\.experimental\.ew\.tneg\.gpr\.masked\.v32f32[^\n]*<32 x float> )%[\w.]+",
+                        r"\1%wrong.input", ir_text or "", count=1))
+                rejected("wrong merge predicate", text, args.case, re.sub(
+                    r"(@llvm\.linx\.experimental\.ew\.tsel\.gpr\.v32f32\(i64 32, i64 1, i64 1, i64 29, i64 )%[\w.]+",
+                    r"\g<1>0", ir_text or "", count=1))
+                rejected("wrong add operand", text, args.case, re.sub(
+                    r"(@llvm\.linx\.experimental\.ew\.tbinary\.gpr\.masked\.v32f32[^\n]*<32 x float> )%[\w.]+",
+                    r"\1%wrong.input", ir_text or "", count=1))
+                print(f"{args.case}: disassembly check PASS")
+                return 0
             if args.case in ("concat_gather_s32_original", "concat_gather_s32_alias_probe"):
                 rejected("missing assembly completion", text.replace("B.ASSEMBLE", "B.ASSEMBLE_REMOVED"), args.case, ir_text)
                 rejected("shrunk logical batch", text.replace("<2KB>", "<128B>"), args.case, ir_text)

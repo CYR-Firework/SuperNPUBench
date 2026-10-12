@@ -7,6 +7,7 @@ SUPPORTED_CASES := histogram_tile_element selected_radix_tile_element \
 	generic_predicated_cfg_i32 generic_typed_tile_cfg_i32 generic_atomic_cfg_i32 elementwise_atomic_histogram \
 	concat_gather_s32_original concat_gather_s32_alias_probe \
 	group_count_s32_original group_count_s32_strong \
+	elementwise_if_for elementwise_if_for_strong \
 	topk_boundaries topk_boundaries_0 \
 	topk_boundaries_1 topk_boundaries_2
 ifeq ($(filter $(TESTCASE),$(SUPPORTED_CASES)),)
@@ -54,6 +55,12 @@ ifeq ($(TESTCASE),group_count_s32_strong)
 SRC_FILE := $(CURDIR)/group_count_s32_original.cpp
 DEFINES += -DGROUP_COUNT_S32_STRONG_CASE=1
 endif
+ifneq ($(filter elementwise_if_for elementwise_if_for_strong,$(TESTCASE)),)
+SRC_FILE := $(CURDIR)/../../../solution/tileop-test/vec/src/elementwise_if_for.cpp
+endif
+ifeq ($(TESTCASE),elementwise_if_for_strong)
+DEFINES += -DELEMENTWISE_IF_FOR_STRONG_CASE=1
+endif
 TARGET = $(ELF_DIR)/$(TESTCASE).elf
 DEFINES += -DSUPERNPUBENCH_LINX_TILE_SIZE -DLINX_ELEMENTWISE_AVAILABLE
 CC_OPTS += $(TARGET_FLAGS) -fno-vectorize -fno-slp-vectorize \
@@ -64,6 +71,7 @@ ifneq ($(filter element_expression_chain signed_element_expression \
 	generic_typed_tile_cfg_i32 generic_atomic_cfg_i32 elementwise_atomic_histogram \
 	concat_gather_s32_original concat_gather_s32_alias_probe topk_boundaries \
 	group_count_s32_original group_count_s32_strong \
+	elementwise_if_for elementwise_if_for_strong \
 	topk_boundaries_0 topk_boundaries_1 topk_boundaries_2,$(TESTCASE)),)
 CC_OPTS += -mllvm -linxv5-enable-generic-element=true
 endif

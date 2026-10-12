@@ -8,6 +8,15 @@ Physical layouts and execution lanes stay inside the TileOp API and compiler.
 
 ## Benchmarks
 
+[`elementwise_if_for.cpp`](../../../solution/tileop-test/vec/src/elementwise_if_for.cpp)
+preserves the original three aligned 512-byte zero buffers and 128 FP32 elements.
+Its complete kernel loads two Tiles, copies logical 32-element parts with raw
+`TMOV`, executes a standard marked loop with `if (a > 0) a + b; else a - b`,
+and stores the result. `elementwise_if_for_strong` adds finite exact dyadic
+inputs, cancellation, signed-zero pairs, and 64-byte output guards. Both use
+independent exact raw-bit goldens with no floating tolerance. Their runtime
+closure and inventory promotion are pending.
+
 [`histogram_tile_element.cpp`](histogram_tile_element.cpp) computes a 256-bin
 histogram over 263 elements. `TLOAD`, `TPARTVIEW`, `TADDS`, and `TANDS` prepare
 the data. Its element-wise loop uses a normal tail condition and relaxed atomic
@@ -209,7 +218,7 @@ bash verification/run_tile_element_suite.sh
 
 The script first installs the selected public API branch into the isolated
 resource directory with its official `make install` target. It then builds
-fifteen ELFs: eleven standalone configurations, one required unsharded 17-call Top-K
+nineteen ELFs: fifteen standalone configurations, one required unsharded 17-call Top-K
 boundary benchmark, and three focused shards of that boundary table. Histogram
 and selected radix each contain one U32 `TLEA` and one masked `MGATHER.ADD`.
 The generic atomic ELF contains one shared S32 B32-to-B64 `TLEA` stream and
@@ -237,11 +246,11 @@ The indexed-gather ELF must contain one ordinary masked `MGATHER` and no
 `MGATHER.ADD`, plus one U32 `TLEA` whose IR contract scales 32-bit element
 indices to byte offsets. Its negative canaries reject a lost execution mask,
 layout, scaling operand, scalar vector-element fallback, or atomic opcode
-substitution. The default command runs seventeen ELFs. During focused development,
+substitution. The default command selects nineteen ELFs, including the two pending FP32 cases. During focused development,
 append `--case indexed_gather_tile_element`, `--case generic_predicated_cfg_i32`,
 `--case generic_typed_tile_cfg_i32`, `--case generic_atomic_cfg_i32`,
-`--case group_count_s32_original`, or `--case group_count_s32_strong` to run one
-case.
+`--case group_count_s32_original`, `--case group_count_s32_strong`,
+`--case elementwise_if_for`, or `--case elementwise_if_for_strong` to run one case.
 
 Every ELF runs unchanged on `gfrun` and `gfsim`. Both memory dumps are checked
 against separately generated input, histogram, output, and status goldens plus

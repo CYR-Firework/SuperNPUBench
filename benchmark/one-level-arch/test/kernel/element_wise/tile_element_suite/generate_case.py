@@ -91,12 +91,55 @@ def main() -> int:
         "generic_atomic_cfg_i32", "elementwise_atomic_histogram", "concat_gather_s32_original",
         "concat_gather_s32_alias_probe",
         "group_count_s32_original", "group_count_s32_strong",
+        "elementwise_if_for", "elementwise_if_for_strong",
         "topk_boundaries", "topk_boundaries_0", "topk_boundaries_1",
         "topk_boundaries_2",
     ))
     parser.add_argument("--out", required=True, type=Path)
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
+
+    if args.case in ("elementwise_if_for", "elementwise_if_for_strong"):
+        strong = args.case == "elementwise_if_for_strong"
+        # Independent raw-bit oracle: every operation below is exact in FP32.
+        # In particular, -0 - +0 retains -0, whereas -0 - -0 yields +0.
+        lhs_pattern = [
+            0x00000000, 0x80000000, 0x00000000, 0x80000000,
+            0x3F800000, 0xBF800000, 0x3F800000, 0xBF800000,
+            0x3F000000, 0xBF000000, 0x40000000, 0xC0000000,
+            0x3E800000, 0xBE800000, 0x41800000, 0xC1800000,
+        ]
+        rhs_pattern = [
+            0x00000000, 0x00000000, 0x80000000, 0x80000000,
+            0xBF800000, 0xBF800000, 0xC0000000, 0x40000000,
+            0x3E800000, 0x3E800000, 0x3F800000, 0xBF800000,
+            0xBE000000, 0xBE000000, 0xC1000000, 0x41000000,
+        ]
+        # Values: +0,-0,+0,+0,+0,+0,-1,-3,.75,-.75,3,-1,
+        # .125,-.125,8,-24. No host-float tolerance or NaN policy is used.
+        result_pattern = [
+            0x00000000, 0x80000000, 0x00000000, 0x00000000,
+            0x00000000, 0x00000000, 0xBF800000, 0xC0400000,
+            0x3F400000, 0xBF400000, 0x40400000, 0xBF800000,
+            0x3E000000, 0xBE000000, 0x41000000, 0xC1C00000,
+        ]
+        lhs = lhs_pattern * 8 if strong else [0] * 128
+        rhs = rhs_pattern * 8 if strong else [0] * 128
+        result = result_pattern * 8 if strong else [0] * 128
+        output = [0x5A5A5A5A] * 16 + result + [0x5A5A5A5A] * 16 if strong else result
+        arrays = {"lhs_storage": ("lhs_f32_bits.bin", lhs),
+                  "rhs_storage": ("rhs_f32_bits.bin", rhs),
+                  "out_storage": ("output_f32_bits.bin", output)}
+        segments = []
+        for symbol, (filename, values) in arrays.items():
+            write_u32(args.out / filename, values)
+            segments.append({"symbol": symbol, "kind": "exact", "file": filename})
+        (args.out / "manifest.json").write_text(json.dumps({
+            "case": args.case, "count": 128, "dtype": "f32_bits",
+            "output_guard_bytes": 64 if strong else 0,
+            "segments": segments,
+        }, indent=2) + "\n")
+        return 0
 
     if args.case in ("group_count_s32_original", "group_count_s32_strong"):
         input_count = 256

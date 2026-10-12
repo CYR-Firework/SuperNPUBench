@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Focused corruption tests for the unordered paired-atomic oracle."""
+"""Corruption tests for paired-atomic and exact FP32 observation contracts."""
 
 from __future__ import annotations
 
@@ -155,6 +155,79 @@ class AtomicPairTraceTest(unittest.TestCase):
         result = self._run()
         self.assertNotEqual(result.returncode, 0, result.stdout)
         self.assertIn("inactive element 127 did not retain", result.stdout)
+
+
+class OriginalF32BitsTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def _fixture(self, strong: bool) -> tuple[Path, Path, bytearray]:
+        golden = self.root / ("strong" if strong else "original")
+        subprocess.run(["python3", str(HERE / "generate_case.py"), "--case",
+                        "elementwise_if_for_strong" if strong else "elementwise_if_for",
+                        "--out", str(golden)], check=True)
+        manifest = json.loads((golden / "manifest.json").read_text())
+        memory = bytearray()
+        symbols = self.root / "symbols.txt"
+        symbol_lines = []
+        for item in manifest["segments"]:
+            data = (golden / item["file"]).read_bytes()
+            symbol_lines.append(f"{0x1000 + len(memory):016x} g O .data {len(data):08x} {item['symbol']}\n")
+            memory.extend(data)
+        symbols.write_text("".join(symbol_lines))
+        return golden, symbols, memory
+
+    def _compare(self, golden: Path, symbols: Path, memory: bytearray) -> subprocess.CompletedProcess[str]:
+        dump = self.root / "memory.bin"
+        dump.write_bytes(memory)
+        return subprocess.run(["python3", str(HERE / "compare_memory.py"),
+                               "--symbols", str(symbols), "--golden", str(golden),
+                               "--dump", str(dump), "--dump-base", "0x1000"],
+                              text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+
+    def test_original_retains_three_512_byte_zero_buffers(self) -> None:
+        golden, symbols, memory = self._fixture(False)
+        self.assertEqual(len(memory), 1536)
+        self.assertEqual(memory, bytes(1536))
+        result = self._compare(golden, symbols, memory)
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_strong_rawbits_and_guards_pass(self) -> None:
+        golden, symbols, memory = self._fixture(True)
+        self.assertEqual(len(memory), 1664)
+        self.assertEqual(memory[1024:1088], bytes([0x5A]) * 64)
+        self.assertEqual(memory[-64:], bytes([0x5A]) * 64)
+        self.assertEqual(struct.unpack_from("<I", memory, 1088 + 4)[0], 0x80000000)
+        result = self._compare(golden, symbols, memory)
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_rejects_signed_zero_normalization(self) -> None:
+        golden, symbols, memory = self._fixture(True)
+        struct.pack_into("<I", memory, 1088 + 4, 0)
+        result = self._compare(golden, symbols, memory)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("expected=0x80000000", result.stdout)
+
+    def test_rejects_input_or_output_guard_corruption(self) -> None:
+        golden, symbols, memory = self._fixture(True)
+        for offset, symbol in ((0, "lhs_storage"), (512, "rhs_storage"),
+                               (1024, "out_storage"), (len(memory) - 1, "out_storage")):
+            with self.subTest(offset=offset):
+                corrupted = memory.copy()
+                corrupted[offset] ^= 1
+                result = self._compare(golden, symbols, corrupted)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn(symbol + ": mismatch", result.stdout)
+
+    def test_rejects_short_output_extent(self) -> None:
+        golden, symbols, memory = self._fixture(True)
+        result = self._compare(golden, symbols, memory[:-1])
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("dump does not cover out_storage", result.stdout)
 
 
 if __name__ == "__main__":

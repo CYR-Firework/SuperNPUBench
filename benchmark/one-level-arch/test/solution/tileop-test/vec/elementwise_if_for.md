@@ -1,19 +1,32 @@
-# Element-wise `if` smoke test
+# FP32 Tile and element `if` kernel
 
-`src/elementwise_if_for.cpp` is the for-loop-with-`if` example from
-LinxISA/llvm-project issues #110/#114.  Build it from this directory with:
+`src/elementwise_if_for.cpp` implements one complete kernel using the official
+`ElementTile<float, 128>` API. It loads both input Tiles, visits four logical
+32-element parts, copies each part with raw `TMOV`, executes an ordinary
+`#pragma pto element for` loop with `a > 0 ? a + b : a - b`, then stores that
+part. The source exposes no physical layout or lane and uses no numeric
+conversion to transport a value.
+
+The original case retains three `alignas(32)` 512-byte buffers, zero
+initialization, 128 FP32 elements, and natural `main` completion. The separate
+`elementwise_if_for_strong` case uses finite exact dyadic values, both branches,
+cancellation, all four signed-zero input pairs, and 64-byte output guards.
+Independent raw-bit goldens check both inputs and the complete output allocation;
+`-0 - +0` must remain `-0`. This profile makes no source-level floating exception
+ordering or `fenv` claim.
+
+Both cases delegate to the existing Tile/element suite build. Supply its fresh
+compiler, musl sysroot, resource directory, and official API include directory,
+then build from this directory with:
 
 ```sh
-export COMPILER_DIR=/path/to/linx_blockisa_llvm_musl/bin
 make TESTCASE=elementwise_if_for diss
+make TESTCASE=elementwise_if_for_strong diss
 ```
 
-The expected lowering is `TLOAD` → `TEXPANDS` → `TCMP` → masked `TADD` and
-`TSUB` → `TSEL` → `TSTORE`.  For a 16×8 FP32 CUBE shape the disassembly must
-show an explicit 32-byte row stride, `TCMP` `LB0=8/LB1=16/LB2=8`, and
-`DTYPE_NONE` in the secondary DATR field of `TCMP`, `TADD`, and `TSUB`.
-
-The resulting ELF is placed under the normal `output/.../elf` tree and is the
-input for the matching `gfrun` and `gfsim` commands described in the repository
-README.  This test intentionally stays separate from the existing 0.58 vector
-microbenchmarks: it exercises the 0.59 ExecutionMask development contract.
+The existing suite runner selects either case using `--case`. Its IR/object
+canaries require masked native FP32 comparison and the actual arithmetic graph:
+`TNEG` → `TSEL` → `TADD` after standard LLVM folds the diamond, or masked
+`TADD`/`TSUB` joined by `TSEL`. Both require raw part Tile transport and value merge, with no residual element marker, scalar extraction
+loop, or extra floating conversion. Runtime validation and migration inventory
+promotion remain pending until a fresh same-ELF gfrun/gfsim run passes.

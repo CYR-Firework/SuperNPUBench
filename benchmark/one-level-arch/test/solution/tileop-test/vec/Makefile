@@ -1,4 +1,4 @@
-ifeq ($(TESTCASE),elementwise_atomic_histogram)
+ifneq ($(filter elementwise_atomic_histogram elementwise_if_for elementwise_if_for_strong,$(TESTCASE)),)
 # Reuse the fresh generic-element compiler/runtime lane for this migrated case.
 SUITE_DIR := $(abspath ../../../kernel/element_wise/tile_element_suite)
 .DEFAULT_GOAL := all
