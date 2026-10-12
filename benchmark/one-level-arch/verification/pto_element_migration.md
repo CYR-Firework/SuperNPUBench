@@ -53,7 +53,8 @@ functional PASS 不代表 gfsim parity。其余应用/wrapper 仍按原范围跟
 
 ## 当前缺口
 
-- 其余 18 条原应用路径和 4 个多线程 wrapper 仍待完整迁移与双模型验证。
+- 其余17条原应用路径和4个多线程 wrapper 仍待完整迁移与验证；
+  已完成 functional 验证的 FP32 应用仅剩独立 timing 跟进。
   特别是原 gather 的 rank-2 FP32 行索引/广播和四个配置，不能由 U32
   indexed-gather foundation 替代。concat 的 S32/FP16、512 元素及完整数据容量
   也仍须保留，不能缩小成 32 元素测试来宣称完成。
