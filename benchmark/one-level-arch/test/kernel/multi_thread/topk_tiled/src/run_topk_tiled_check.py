@@ -109,7 +109,7 @@ def golden_topk_fp16_keys(values, row):
 def run_check(model, timeout, seed, mode, simulator="gfrun", run_dir=None, elf_path=None):
     elf = (elf_path or ELF_DIR / ELF_NAME).resolve()
     if not elf.exists():
-        return "SKIP", f"missing {elf}"
+        return "FAIL", f"missing {elf}"
     case_dir = COMPARE_ROOT / elf.stem
     case_dir.mkdir(parents=True, exist_ok=True)
     for stem in EXPORTS + ("golden.bin",):
@@ -129,7 +129,7 @@ def run_check(model, timeout, seed, mode, simulator="gfrun", run_dir=None, elf_p
         command = [sys.executable, str(ONE_LEVEL_ROOT / "test/common/run_swimlane.py"),
                    "--gfsim", str(model), "--elf", str(elf),
                    "--outdir", str(run_dir), "--name", "topk",
-                   "--conf", "fourpe", "--timeout", str(timeout)]
+                   "--conf", str(model.parent.parent / "configs/fourpe.conf"), "--timeout", str(timeout)]
     else:
         command = [str(model), "-s", "softcore.multiThreadNum=4", "-f", str(elf)]
     log = case_dir / f"{simulator}.log"
@@ -137,7 +137,7 @@ def run_check(model, timeout, seed, mode, simulator="gfrun", run_dir=None, elf_p
         proc = subprocess.run(command, stdout=subprocess.PIPE,
                               stderr=subprocess.STDOUT, text=True,
                               timeout=timeout + 10, check=False,
-                              cwd=model.parent.parent)
+                              cwd=case_dir)
     except subprocess.TimeoutExpired as exc:
         log.write_text((exc.stdout or b"").decode() if isinstance(exc.stdout, bytes)
                        else (exc.stdout or ""), encoding="utf-8")
@@ -237,7 +237,7 @@ def main():
     status, detail = run_check(args.gfsim or args.gfrun, args.timeout, args.seed, args.mode,
                              "gfsim" if args.gfsim else "gfrun", args.run_dir, args.elf)
     print(f"{status} topk {detail}")
-    failed = status not in ("PASS", "SKIP")
+    failed = status != "PASS"
     print(f"summary: {0 if failed else 1} ok, {1 if failed else 0} failed")
     return 1 if failed else 0
 
