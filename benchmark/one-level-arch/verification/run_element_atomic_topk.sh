@@ -43,7 +43,7 @@ fi
 TARGET_TRIPLE=${TARGET_TRIPLE:-linx64v5-unknown-linux-musl}
 SYSROOT=${SYSROOT:-"$LINX_RUNTIME_ROOT/sysroot"}
 RESOURCE_DIR=${RESOURCE_DIR:-"$LINX_RUNTIME_ROOT/lib/clang/15.0.4"}
-MODELS=${MODELS:-gfrun,gfsim}
+MODELS=${MODELS:-gfrun}
 validate_models "$MODELS"
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)

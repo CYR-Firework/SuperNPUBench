@@ -13,10 +13,13 @@ default_cases=(
     concat_gather_s32_original
     concat_gather_s32_alias_probe
     concat_gather_f16_original
+    concat_gather_f16_alias_probe
     group_count_s32_original
     group_count_s32_strong
     elementwise_if_for
     elementwise_if_for_strong
+    elementwise_masked_gather_scatter
+    elementwise_masked_gather_scatter_strong
     topk_boundaries_0
     topk_boundaries_1
     topk_boundaries_2

@@ -13,7 +13,7 @@ true_bin=$(type -P true)
 artifact_dir="$tmp_dir/existing-artifact"
 mkdir -p "$artifact_dir"
 printf 'preserve-me\n' > "$artifact_dir/sentinel"
-if MODELS=gfrun \
+if env -u MODELS \
     COMPILER_DIR="$tmp_dir/compiler" \
     SSM="$tmp_dir/model" \
     LINX_RUNTIME_ROOT="$tmp_dir/runtime" \
