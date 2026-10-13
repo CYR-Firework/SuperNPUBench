@@ -82,16 +82,15 @@ functional profile；其余16条原应用及4个wrapper仍未闭环。API后续�
 冻结的 `20261012-functional-integer-final-*` 共17例通过，审计435项hash。
 其中原 `elementwise_atomic_histogram`、原 `group_count<16,8,32>` 及其独立
 重复调用/别名强化例已获得 functional profile。concat 的原 S32 配置
-（128000输入/输出、512元素批次）及独立别名例通过；FP16 配置仍在验证，
-因此 concat 整条应用保持 pending。
+（128000输入/输出、512元素批次）及独立别名例通过；FP16 的后续完整验收见下节。
 
 这些运行的输入为 compiler `8bc0f201`、API `07cc52dd`、gfrun `30e90b74`、
 benchmark `81443975`，精确哈希与路径见 JSON。所有运行只选择 gfrun。
 原777元素TopK另有 `20261012-functional-topk777-final` 的9段内存通过证据。
 本轮使用单模拟PE与SDK的mask1111，不能据此声称四PE wrapper已通过。
 
-目前7条应用有对应的精确已验证profile，另有concat S32子配置；其余原始
-类型/规模和4个wrapper仍保留在分母内。历史双模型结果保持原运行含义。
+该历史运行关闭对应的整数 profile；后续 FP16 结果使当前8条应用具有精确验证
+profile，其余原配置与4个wrapper仍保留在分母内。历史双模型结果保持原运行含义。
 
 ## 原始 FP16 concat functional 闭环
 
@@ -109,9 +108,29 @@ compiler `87c09db`、API `b0967b0`、gfrun `98c21b0`、benchmark `e127faf`。
 每段16MiB上限，原始分段与合并文件均保留；没有增加模型容量或替代参考内存。
 
 concat的两个原始dtype配置现在都有独立functional证据。当前8条应用有精确
-验证profile，其余原配置和全部4个多线程wrapper仍未完成。当前源码回归发现的
-额外typed-TMOV检查器计数和group_count descriptor证明问题另行修复；不改写
-这里已经冻结的FP16版本和结果。
+验证profile，其余原配置和全部4个多线程wrapper仍未完成。后续 typed-TMOV 检查器和 group_count spill 描述符问题已按下节修复；
+这里已经冻结的 FP16 版本和结果保持不变。
+
+## 当前编译器与 gfrun 组合回归
+
+compiler `4d5fb502`、API `b0967b0`、gfrun `6850368` 的23个 suite profile
+和原始777元素TopK全部PASS+FROZEN。整数/TopK执行时benchmark为`59ce0cd`，
+FP32/FP16执行时为`9b9bbaa`；后一提交仅修正FP32检查器对typed parent队列
+复制的识别，不改变kernel或golden。逐例执行版本和内容ID见JSON。
+
+独立审计共649项hash、运行前后身份、原始输入/输出/guards/状态；
+完整FP16保持8192000输入、2048000输出与512元素批次。较早的两份FP16 ELF
+在新模型上的重放另行记录，不替代本轮重新编译运行。gfrun预编译适用集
+vector168/168、memory25/25、scalar124/124，emu61/61，diff1148730/0。
+
+编译器按精确FI/MMO和descriptor容量传递spill来源，覆盖reload→respill、
+循环、COPY、栈槽复用及已完成assembly。OPEN/Shared/subview和不一致来源拒绝。
+定向编译21/21通过；宽集119/123，4个既有前端失败仍明确保留。两个正向
+引用Tile用例在O2也缺少证明支持，不能仅修改旧O0期望来宣称已闭合。
+
+API仍有FP32大parent、2048元素FP16的多代assembly、完整parent的部分写入
+等边界；具体列表见JSON的`element_api_remaining_gaps`。24个运行profile
+不等于21条原应用/all configs及4个wrapper已完成。gfsim统一留到后续PR。
 
 ## 当前缺口
 
@@ -125,8 +144,9 @@ concat的两个原始dtype配置现在都有独立functional证据。当前8条�
   明确unordered/source契约下的单一隔离indexed scatter已有编译支持。
   System/Monotonic i32 atomic add保持既有约束。FP32 memory现已取得原应用
   functional证据；这不代表任意别名或多条无序写流都可接受。
-  varying内层循环、原配置所需的FP16/更宽carrier、其他原子操作/ordering、
-  未证明隔离的indexed写入和O0 typed spill仍未闭合。
+  FP16/U16 及匹配 S32/U32 的 logical64 profile 现已通过定向编译与功能门禁。
+  varying 内层循环、更大的 FP32 快照、其他原子操作/ordering、未证明隔离的
+  indexed 写入、O0 marked region 和引用参数 Tile 的提升/别名证明仍未闭合。
 - API 提供某 dtype 的存储/transport，不等于该 dtype 的 marked element loop
   已可执行。QLI 私有 histogram 汇编、稀疏 MLA 的 spill/标量索引阶段、动态
   哈希探测都需要各自的完整算法迁移，不能用新的小型 histogram 替代。
@@ -152,7 +172,7 @@ mnemonic 和缺失头文件的旧 driver 单独登记，不隐式恢复已退休
 
 - [NPUbench #202](https://github.com/PTO-ISA/SuperNPUBench/pull/202)
 - [LLVM #118](https://github.com/LinxISA/llvm-project/pull/118)
-- [TileOp API #249](https://github.com/LinxISA/Linx-TileOP-API/pull/249)
+- [TileOp API #255](https://github.com/LinxISA/Linx-TileOP-API/pull/255)
 - [FP32 gfrun #949](https://github.com/LinxISA/SuperScalarModel/pull/949)
 - [模型 #925](https://github.com/LinxISA/SuperScalarModel/pull/925)
 - [规格 #369](https://github.com/PTO-ISA/pto-spec/pull/369)
