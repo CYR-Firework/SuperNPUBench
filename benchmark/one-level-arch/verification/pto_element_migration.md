@@ -93,6 +93,26 @@ benchmark `81443975`，精确哈希与路径见 JSON。所有运行只选择 gfr
 目前7条应用有对应的精确已验证profile，另有concat S32子配置；其余原始
 类型/规模和4个wrapper仍保留在分母内。历史双模型结果保持原运行含义。
 
+## 原始 FP16 concat functional 闭环
+
+原配置的8192000个FP16输入、2048000个输出、512元素批次以及256×8→256×8000
+形状已完整通过，另有512元素整批快照的重叠输出探针。原driver没有启用输入
+文件且使用未初始化缓冲区；新测试明确使用确定性raw-bit fixture，原容量、
+形状和kernel访问/快照语义保持不变。
+
+`20261013-f16-concat-original-clean-87c09` 与
+`20261013-f16-concat-alias-clean-87c09` 均PASS+FROZEN。执行输入全部clean：
+compiler `87c09db`、API `b0967b0`、gfrun `98c21b0`、benchmark `e127faf`。
+独立审计验证31+29项hash和每例7段内存，覆盖完整输入/unused tail、输出、
+相邻64-byte guards、shape和status。普通例观察20480312 bytes，别名例观察
+16385336 bytes，全部精确匹配。大内存观察由同一次gfrun执行分段导出，保持
+每段16MiB上限，原始分段与合并文件均保留；没有增加模型容量或替代参考内存。
+
+concat的两个原始dtype配置现在都有独立functional证据。当前8条应用有精确
+验证profile，其余原配置和全部4个多线程wrapper仍未完成。当前源码回归发现的
+额外typed-TMOV检查器计数和group_count descriptor证明问题另行修复；不改写
+这里已经冻结的FP16版本和结果。
+
 ## 当前缺口
 
 - 其余未完成的原应用配置和4个多线程 wrapper 仍待完整迁移与验证；

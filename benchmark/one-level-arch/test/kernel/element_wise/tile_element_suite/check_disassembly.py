@@ -200,9 +200,14 @@ def validate_generic_typed_tile_cfg(text: str, ir_text: str | None) -> None:
     tstore = sites(r"\bBSTART\.TLSU\s+TSTORE, S32\b")
     if len(tload) != 1 or not subview:
         raise CheckError("typed CFG lost TLOAD128/TPARTVIEW32 lowering")
-    if len(tadds) != 2 or len(tmov) != 1 or len(tstore) != 1:
+    if len(tadds) != 2 or len(tstore) != 1:
         raise CheckError("typed CFG lost its exact TileOp bridge shape")
-    if not (tload[0] < tadds[0] < tadds[1] < tmov[0] < tstore[0]):
+    # The seed belongs between the second TADDS and TSTORE. Typed queue
+    # maintenance may additionally copy the 128-element parent after TSTORE.
+    seed_moves = [site for site in tmov if tadds[1] < site < tstore[0]]
+    if len(seed_moves) != 1:
+        raise CheckError("typed CFG lost its exact raw TMOV seed")
+    if not (tload[0] < tadds[0] < tadds[1] < seed_moves[0] < tstore[0]):
         raise CheckError("typed CFG no longer alternates TileOp/element/TileOp in order")
     if not (tload[0] < subview[0] < tstore[0]):
         raise CheckError("typed CFG moved TPARTVIEW outside the Tile lifetime")

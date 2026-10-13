@@ -70,7 +70,7 @@
       "id": "concat_gather",
       "source": "benchmark/one-level-arch/kernels/single_thread/concat/concat_gather.hpp",
       "access_kind": "indexed_gm_load",
-      "status": "pending",
+      "status": "verified_functional_profile",
       "requirements": [
         "canonical_pto_element_for",
         "logical_element_arrays",
@@ -81,39 +81,86 @@
         "zero_model_invariants"
       ],
       "evidence": {
-        "acceptance_scope": "exact original and separately named strong/alias gfrun profiles",
-        "spec_commit": "8f589b70085a37c70f210898b168aae634da5ac1",
-        "repositories": {
-          "benchmark": "814439750ee53221315282a936dc64529348cb0f",
-          "compiler": "8bc0f201b8cf3fc22acf3b17aba547ab99382822",
-          "model": "30e90b74ae622d6aba9b971acd6b85786d4dece9",
-          "tileop_api": "07cc52dd30ba68587db10f0a2b9d6d8eb86c7c4c"
-        },
-        "runs": [
+        "acceptance_scope": "both original compile.all configurations with separately checked alias probes; exact inputs per profile",
+        "profiles": [
           {
-            "case": "concat_gather_s32_original",
-            "artifact": "tile_element_suite/20261012-functional-integer-final-concat_gather_s32_original",
-            "content_id": "d671b3f35ad14c76938c8d68a81631bfe5f5e09a441b531548b19885807c2e6d",
-            "elf_sha256": "d1fc25692980eadcfd0482a3f5dfbc2d8514c9231a511ebc5b9fbe74c2648a5a",
-            "provenance_sha256": "7d27b1afd8a11d41a2f7b59394563d907ec1fcccef87e46bc8cec2c75868d481",
-            "verified_hash_count": 26,
-            "selected_models": [
-              "gfrun"
-            ]
+            "value_dtype": "S32",
+            "acceptance_scope": "exact original and separately named strong/alias gfrun profiles",
+            "spec_commit": "8f589b70085a37c70f210898b168aae634da5ac1",
+            "repositories": {
+              "benchmark": "814439750ee53221315282a936dc64529348cb0f",
+              "compiler": "8bc0f201b8cf3fc22acf3b17aba547ab99382822",
+              "model": "30e90b74ae622d6aba9b971acd6b85786d4dece9",
+              "tileop_api": "07cc52dd30ba68587db10f0a2b9d6d8eb86c7c4c"
+            },
+            "runs": [
+              {
+                "case": "concat_gather_s32_original",
+                "artifact": "tile_element_suite/20261012-functional-integer-final-concat_gather_s32_original",
+                "content_id": "d671b3f35ad14c76938c8d68a81631bfe5f5e09a441b531548b19885807c2e6d",
+                "elf_sha256": "d1fc25692980eadcfd0482a3f5dfbc2d8514c9231a511ebc5b9fbe74c2648a5a",
+                "provenance_sha256": "7d27b1afd8a11d41a2f7b59394563d907ec1fcccef87e46bc8cec2c75868d481",
+                "verified_hash_count": 26,
+                "selected_models": [
+                  "gfrun"
+                ]
+              },
+              {
+                "case": "concat_gather_s32_alias_probe",
+                "artifact": "tile_element_suite/20261012-functional-integer-final-concat_gather_s32_alias_probe",
+                "content_id": "b3970ffa3683991e40b114af0e078ff87bbdf6193480120194c58daac207b719",
+                "elf_sha256": "e4a77ba7cf0702fae4f5841fed3437e49e6a993745d80ee32fdb52a55efcbcd6",
+                "provenance_sha256": "5f21736941ea4311a374bbfe814047c29a79ae100437247d951f16b2edb92793",
+                "verified_hash_count": 26,
+                "selected_models": [
+                  "gfrun"
+                ]
+              }
+            ],
+            "execution_profile": "one simulated PE with SDK mask1111; not four-PE collective proof"
           },
           {
-            "case": "concat_gather_s32_alias_probe",
-            "artifact": "tile_element_suite/20261012-functional-integer-final-concat_gather_s32_alias_probe",
-            "content_id": "b3970ffa3683991e40b114af0e078ff87bbdf6193480120194c58daac207b719",
-            "elf_sha256": "e4a77ba7cf0702fae4f5841fed3437e49e6a993745d80ee32fdb52a55efcbcd6",
-            "provenance_sha256": "5f21736941ea4311a374bbfe814047c29a79ae100437247d951f16b2edb92793",
-            "verified_hash_count": 26,
-            "selected_models": [
-              "gfrun"
-            ]
+            "value_dtype": "FP16",
+            "spec_commit": "8f589b70085a37c70f210898b168aae634da5ac1",
+            "repositories": {
+              "benchmark": "e127fafa52fcf967ad71edcfe2ce3f60b6d096e5",
+              "compiler": "87c09dbb9a8bc68d4fd080a1e0a6c32d05c6de4f",
+              "model": "98c21b0627d67624a9f6d7e7f715a7a6eb6f491d",
+              "tileop_api": "b0967b0174dbc8563ba281aee0e1b4d06c2d5a68"
+            },
+            "runs": [
+              {
+                "case": "concat_gather_f16_original",
+                "artifact": "tile_element_suite/20261013-f16-concat-original-clean-87c09",
+                "content_id": "e35fa82165fc1e958a41a5aa3339174663cae142ee0ea1123df122413eb73dd2",
+                "elf_sha256": "b25aefe17bb8154486f21ddd9e242a9923d2c546bb163a13d753c1e9d2bd1ec5",
+                "provenance_sha256": "5ecc52a92b4c79e54549bb4c4cd74382c0b41227e11a1ec810d4f93f88ef4a86",
+                "verified_hash_count": 31,
+                "memory_bytes": 20480312,
+                "segments": 7,
+                "selected_models": [
+                  "gfrun"
+                ]
+              },
+              {
+                "case": "concat_gather_f16_alias_probe",
+                "artifact": "tile_element_suite/20261013-f16-concat-alias-clean-87c09",
+                "content_id": "03b6effaa6bedb6dc2fb57dc6467c5f3585ece8eeb87eedea591ce57f5164deb",
+                "elf_sha256": "830939bbc77151a34b73f9cad63ef97e22a98d5332bbfc8d36a8a256d7d383a4",
+                "provenance_sha256": "3b6000d43b70b8d4f5a9600b3d910dc44c737ba6c1570afb7f0fed99f5277ffb",
+                "verified_hash_count": 29,
+                "memory_bytes": 16385336,
+                "segments": 7,
+                "selected_models": [
+                  "gfrun"
+                ]
+              }
+            ],
+            "comparison": "exact raw binary16 bytes, all input including unused tail, output, adjacent guards, shapes and status",
+            "input_fixture": "deterministic raw bits; legacy driver used uninitialized buffers with no enabled file fixture",
+            "execution_profile": "one simulated PE with SDK mask1111; not four-PE collective proof"
           }
-        ],
-        "execution_profile": "one simulated PE with SDK mask1111; not four-PE collective proof"
+        ]
       },
       "configuration_source": "benchmark/one-level-arch/test/kernel/concat/compile.all",
       "configurations": [
@@ -149,12 +196,11 @@
           ],
           "data_dim": 2,
           "concat_dim": 1,
-          "migration_status": "pending"
+          "migration_status": "verified_functional_profile"
         }
       ],
       "timing_status": "pending_separate_pr",
       "remaining_profiles": [
-        "original FP16 configuration",
         "multi-thread wrapper"
       ]
     },
