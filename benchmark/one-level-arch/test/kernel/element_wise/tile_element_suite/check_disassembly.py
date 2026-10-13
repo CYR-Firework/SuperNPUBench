@@ -821,8 +821,45 @@ def validate_concat_f16_original(text: str, ir_text: str | None) -> None:
         raise CheckError("F16 concat parent allocation no longer preserves 512 elements")
 
 
+def without_parent_queue_copies(body: str, terminal: str,
+                                      parent_types: dict[str, str]) -> str:
+    """Validate allocator copies separately from the source-level Tile bridge."""
+    terminal_sites = list(re.finditer(
+        rf"BSTART\.TLSU\s+{terminal}, FP32\b", body))
+    seen: set[str] = set()
+
+    def keep_semantic_copy(match: re.Match[str]) -> str:
+        bundle = match.group(0)
+        if "<512B>" not in bundle:
+            return bundle
+        binding = re.search(
+            r"B\.IOT\s+([tu])#\d+, mask=1111, last,\s+->([tu])<512B>",
+            bundle)
+        dtype = match.group(1)
+        if (not terminal_sites or match.start() < terminal_sites[-1].start() or
+                not binding or binding[1] != binding[2] or
+                parent_types.get(binding[1]) != dtype or binding[1] in seen):
+            raise CheckError("FP32 parent queue copy lost its dtype, identity or placement")
+        if (not re.search(r"B\.DATR\s+CUBE_M32\.normal, Zero\b", bundle) or
+                any(token in bundle for token in
+                    ("B.SUBVIEW", "B.ASSEMBLE", "B.IOR", "ExecMaskPresent")) or
+                len(re.findall(r"\bB\.DATR\b", bundle)) != 1 or
+                len(re.findall(r"\bB\.IOT\b", bundle)) != 1 or
+                len(re.findall(r"\bB\.DIMI?\b", bundle)) != 3 or
+                sorted(re.findall(r"C\.B\.DIMI\s+(\d+),\s+->lb([012])\b", bundle)) !=
+                sorted([("4", "0"), ("32", "1"), ("4", "2")])):
+            raise CheckError("FP32 parent queue copy changed its complete 512B descriptor")
+        seen.add(binding[1])
+        return ""
+
+    return re.sub(r"BSTART\.TLSU\s+TMOV, (\w+)\b.*?(?=BSTART|\Z)",
+                  keep_semantic_copy, body, flags=re.S)
+
+
 def validate_original_f32(text: str, ir_text: str | None) -> None:
     body = function_body(text, "elementwise_if_for")
+    body = without_parent_queue_copies(
+        body, "TSTORE", {"t": "FP32", "u": "FP32"})
     lines = instruction_lines(body)
     transport = [re.search(r"BSTART\.TLSU\s+(TLOAD|TMOV|TSTORE), FP32\b", line)
                  for line in lines]
@@ -978,6 +1015,8 @@ def validate_original_f32(text: str, ir_text: str | None) -> None:
 def validate_masked_gather_scatter_f32(text: str,
                                        ir_text: str | None) -> None:
     body = function_body(text, "elementwise_masked_gather_scatter")
+    body = without_parent_queue_copies(
+        body, "MSCATTER", {"t": "S32", "u": "U32"})
     lines = instruction_lines(body)
 
     def sites(pattern: str) -> list[int]:
@@ -1193,6 +1232,38 @@ def main() -> int:
     try:
         validate(text, args.case, ir_text)
         if args.self_test:
+            if args.case in ("elementwise_if_for", "elementwise_if_for_strong",
+                             "elementwise_masked_gather_scatter",
+                             "elementwise_masked_gather_scatter_strong"):
+                # Queue copies must not hide a missing semantic part copy, and
+                # malformed full-parent copies must never be filtered away.
+                rejected("missing borrowed part view", text.replace(
+                    "B.SUBVIEW", "B.SUBVIEW_REMOVED", 1), args.case, ir_text)
+                semantic_copy = next((match for match in re.finditer(
+                    r"BSTART\.TLSU\s+TMOV, \w+\b.*?(?=BSTART|\Z)", text, re.S)
+                    if "B.SUBVIEW" in match.group(0)), None)
+                if semantic_copy:
+                    rejected("missing complete part-copy bundle", text[:semantic_copy.start()] +
+                             text[semantic_copy.end():], args.case, ir_text)
+                parent_copy = next((match for match in re.finditer(
+                    r"BSTART\.TLSU\s+TMOV, \w+\b.*?(?=BSTART|\Z)", text, re.S)
+                    if "<512B>" in match.group(0)), None)
+                if parent_copy:
+                    original = parent_copy.group(0)
+                    for label, broken in (
+                        ("wrong parent-copy shape", re.sub(
+                            r"(C\.B\.DIMI\s+)32(,\s+->lb1)",
+                            r"\g<1>16\2", original)),
+                        ("overridden parent-copy dimension", re.sub(
+                            r"(C\.B\.DIMI[^\n]*->lb1[^\n]*)",
+                            r"\1\n f00d: 00000000 C.B.DIMI 16, ->lb1", original)),
+                        ("missing parent-copy dtype", re.sub(
+                            r"TMOV, \w+", "TMOV, DTYPE_NONE", original)),
+                        ("wrong parent-copy destination", re.sub(
+                            r"->[tu]<512B>", "->n<512B>", original)),
+                    ):
+                        rejected(label, text[:parent_copy.start()] + broken +
+                                 text[parent_copy.end():], args.case, ir_text)
             if args.case in ("elementwise_masked_gather_scatter",
                              "elementwise_masked_gather_scatter_strong"):
                 for opcode in ("MGATHER", "MSCATTER"):
