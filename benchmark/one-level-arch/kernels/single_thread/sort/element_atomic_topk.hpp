@@ -57,20 +57,18 @@ inline TopKResult topk16(const uint32_t *input, std::size_t count,
     TLOAD(keys, input + begin, valid);
     auto parts = TPARTVIEW<kPartElements>(keys, valid);
     for (std::size_t part = 0; part < parts.size(); ++part) {
-      ElementTile<uint32_t, kPartElements> values, buckets, old;
+      ElementTile<uint32_t, kPartElements> values, old;
       auto view = parts.part(part);
-      TADDS(values, view, 0u);
-      TSHRS(buckets, values, 8u);
-      // element array 借用 Tile 的逻辑元素，不复制主存数组或暴露物理布局。
-      auto &bucket_elements = TPARTELEMENT(buckets);
+      TMOV(values, view);
+      const auto &key_elements = TPARTELEMENT(values);
       auto &old_elements = TPARTELEMENT(old);
       const uint32_t valid_elements = static_cast<uint32_t>(parts.valid_size(part));
-// 只对有效、被选中的逻辑元素生成原子效果；由编译器生成谓词与字节索引。
+      // 位运算、条件和原子更新都用标量 C++ 表达，由 pragma 完成 Tile lowering。
 #pragma pto element for
       for (unsigned element = 0; element < kPartElements; ++element) {
         if (element < valid_elements) {
           old_elements[element] = __atomic_fetch_add(
-              &high_hist[bucket_elements[element]], 1u, __ATOMIC_RELAXED);
+              &high_hist[key_elements[element] >> 8], 1u, __ATOMIC_RELAXED);
         } else {
           old_elements[element] = 0;
         }
@@ -101,22 +99,19 @@ inline TopKResult topk16(const uint32_t *input, std::size_t count,
     TLOAD(keys, input + begin, valid);
     auto parts = TPARTVIEW<kPartElements>(keys, valid);
     for (std::size_t part = 0; part < parts.size(); ++part) {
-      ElementTile<uint32_t, kPartElements> values, buckets, predicate, old;
+      ElementTile<uint32_t, kPartElements> values, old;
       auto view = parts.part(part);
-      TADDS(values, view, 0u);
-      TSHRS(predicate, values, 8u);
-      TANDS(buckets, values, 0xffu);
-      // element array 借用 Tile 的逻辑元素，不复制主存数组或暴露物理布局。
-      auto &bucket_elements = TPARTELEMENT(buckets);
-      auto &predicate_elements = TPARTELEMENT(predicate);
+      TMOV(values, view);
+      const auto &key_elements = TPARTELEMENT(values);
       auto &old_elements = TPARTELEMENT(old);
       const uint32_t valid_elements = static_cast<uint32_t>(parts.valid_size(part));
-// 只对有效、被选中的逻辑元素生成原子效果；由编译器生成谓词与字节索引。
+      // 位运算、条件和原子更新都用标量 C++ 表达，由 pragma 完成 Tile lowering。
 #pragma pto element for
       for (unsigned element = 0; element < kPartElements; ++element) {
-        if (element < valid_elements && predicate_elements[element] == selected_high) {
+        if (element < valid_elements &&
+            (key_elements[element] >> 8) == selected_high) {
           old_elements[element] = __atomic_fetch_add(
-              &low_hist[bucket_elements[element]], 1u, __ATOMIC_RELAXED);
+              &low_hist[key_elements[element] & 0xffu], 1u, __ATOMIC_RELAXED);
         } else {
           old_elements[element] = 0;
         }

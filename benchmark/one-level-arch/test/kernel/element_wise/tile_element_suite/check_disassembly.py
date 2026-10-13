@@ -1098,7 +1098,157 @@ def validate_masked_gather_scatter_f32(text: str,
         raise CheckError("FP32 gathered payload needs one raw official TMOV")
 
 
+def validate_concat_scatter(text: str, case: str, ir_text: str | None) -> None:
+    candidates = re.findall(r"^[0-9a-f]+ <([^>]*concat_scatter[^>]*)>:", text, re.M)
+    bodies = [(name, function_body(text, name)) for name in candidates]
+    bodies = [(name, body) for name, body in bodies
+              if re.search(r"BSTART\.TLSU\s+TLOAD,", body) and
+                 re.search(r"BSTART\.TLSU\s+MSCATTER,", body)]
+    if len(bodies) != 1:
+        raise CheckError("concat scatter needs one native snapshot/scatter function")
+    symbol, body = bodies[0]
+    fp16 = "_f16_" in case
+    fourpe = case == "concat_scatter_fourpe"
+    dtype, lanes = ("FP16", 64) if fp16 else (("FP32", 32) if fourpe else ("S32", 32))
+    loads = list(re.finditer(rf"BSTART\.TLSU\s+TLOAD, {dtype}\b", body))
+    stores = list(re.finditer(rf"BSTART\.TLSU\s+MSCATTER, {dtype}\b", body))
+    parts = [match for match in re.finditer(
+        rf"BSTART\.TLSU\s+TMOV, {dtype}\b.*?(?=BSTART|\Z)", body, re.S)
+        if re.search(r"\bB\.SUBVIEW\b", match.group(0))]
+    if (len(loads) != 1 or len(stores) != 1 or len(parts) != 1 or
+            not loads[0].start() < parts[0].start() < stores[0].start()):
+        raise CheckError("concat scatter lost full-input snapshot before part stores")
+    load_bundle = re.search(rf"BSTART\.TLSU\s+TLOAD, {dtype}\b.*?(?=BSTART|\Z)",
+                            body, re.S).group(0)
+    capacity = "<512B>" if fourpe else ("<1KB>" if fp16 else "<2KB>")
+    if capacity not in load_bundle:
+        raise CheckError("concat scatter changed its original512 snapshot capacity")
+    if not re.search(r"BSTART\.TEPL\s+TLEA, U32\b", body):
+        raise CheckError("concat scatter lost B32 indices to B64 byte addressing")
+    store_bundle = re.search(rf"BSTART\.TLSU\s+MSCATTER, {dtype}\b.*?(?=BSTART|\Z)",
+                             body, re.S).group(0)
+    if "ExecMaskPresent" not in store_bundle or "TCVT" in body:
+        raise CheckError("concat scatter lost execution mask or raw value transport")
+    if ir_text is None:
+        raise CheckError("concat scatter requires actual-source IR")
+    ir = ir_function_body(ir_text, symbol)
+    if re.search(r"extractelement|insertelement|@llvm\.vp\.|"
+                 r"@llvm\.linx\.experimental\.element\.(region|view|scatter)", ir):
+        raise CheckError("concat scatter retains scalar or intermediate element effects")
+    payload = "half" if fp16 else ("float" if fourpe else "i32")
+    scatters = re.findall(r"call void @llvm\.linx\.experimental\.ew\.mscatter\.gpr\.masked[^\n]*", ir)
+    if len(scatters) != 1 or f"<{lanes} x {payload}>" not in scatters[0]:
+        raise CheckError("concat scatter changed its typed element payload")
+    if f"<{lanes} x i64>" not in scatters[0]:
+        raise CheckError("concat scatter lost native B64 byte offsets")
+
+
+def validate_broadcast_inline(text: str, ir_text: str | None) -> None:
+    if ir_text is None:
+        raise CheckError("inline broadcast requires actual-source IR")
+    body = function_body(text, "broadcast")
+    ir = ir_function_body(ir_text, "broadcast")
+    if not re.search(r"BSTART\.TLSU\s+MGATHER, U32\b", body) or not re.search(r"BSTART\.TLSU\s+TSTORE, S32\b", body):
+        raise CheckError("inline broadcast missing native integer gather/store")
+    if not re.search(r"\bB\.ASSEMBLE\b", body) or "<2KB>" not in body:
+        raise CheckError("inline broadcast lost its original512-element snapshot")
+    if not re.search(r"BSTART\.TEPL\s+TLEA, U32\b", body):
+        raise CheckError("inline broadcast lost B32 address indices")
+    if re.search(r"extractelement|insertelement|@llvm\.vp\.|@llvm\.linx\.experimental\.element\.(region|view|gather)", ir):
+        raise CheckError("inline broadcast retains scalar/intermediate element effects")
+
+
+def validate_broadcast_fourpe(text: str, ir_text: str | None) -> None:
+    if ir_text is None:
+        raise CheckError("four-PE broadcast requires actual-source IR")
+    for opcode in ("TLOAD", "TSTORE"):
+        if not re.search(rf"BSTART\.TLSU\s+{opcode}, FP32\b", text):
+            raise CheckError("four-PE broadcast missing native " + opcode)
+    if "<512B>" not in text or "<128 x i32>" not in ir_text:
+        raise CheckError("four-PE broadcast changed its original128-element tile")
+    load = re.search(r"BSTART\.TLSU\s+TLOAD, FP32\b.*?(?=BSTART|\Z)", text, re.S)
+    if not load or not re.search(r"C\.B\.DIMI\s+128,\s+->lb0", load[0]) or not re.search(r"C\.B\.DIMI\s+128,\s+->lb2", load[0]):
+        raise CheckError("four-PE broadcast changed its original transport geometry")
+
+
+def validate_gather_hierarchy(text: str, ir_text: str | None) -> None:
+    if ir_text is None:
+        raise CheckError("gather requires actual-source IR")
+    body = function_body(text, "_Z6gather")
+    ir = ir_function_body(ir_text, "_Z6gather")
+    for opcode in ("MGATHER", "MSCATTER"):
+        if not re.search(rf"BSTART\.TLSU\s+{opcode}, FP32\b", body):
+            raise CheckError("gather missing FP32 native " + opcode)
+    if not re.search(r"BSTART\.TEPL\s+TLEA, U32\b", body):
+        raise CheckError("gather requires B32 logical address indices")
+    if not re.search(r"\bB\.ASSEMBLE\b", body) or not re.search(r"\bB\.SUBVIEW\b", body):
+        raise CheckError("gather lost the complete public hierarchical snapshot")
+    if not re.search(r"call <32 x float> @llvm\.linx\.experimental\.ew\.mgather", ir):
+        raise CheckError("gather missing logical32 native value reads")
+    if not re.search(r"call void @llvm\.linx\.experimental\.ew\.mscatter[^\n]*<32 x float>", ir):
+        raise CheckError("gather missing native raw value writes")
+    if re.search(r"extractelement|insertelement|@llvm\.vp\.|"
+                 r"@llvm\.linx\.experimental\.element\.(region|view|gather|scatter)", ir):
+        raise CheckError("gather retains scalar or intermediate element effects")
+    if re.search(r"alloca \[(32|128) x i32\]", ir):
+        raise CheckError("gather has scalar index snapshot scratch")
+
+
+def validate_concat_gather_fourpe(text: str, ir_text: str | None) -> None:
+    if ir_text is None:
+        raise CheckError("four-PE concat gather requires actual-source IR")
+    if not re.search(r"call <32 x float> @llvm\.linx\.experimental\.ew\.mgather\.gpr\.masked", ir_text):
+        raise CheckError("four-PE concat gather missing FP32 native reads")
+    for pattern in (r"BSTART\.TLSU\s+MGATHER, FP32\b", r"BSTART\.TLSU\s+TSTORE, FP32\b",
+                    r"BSTART\.TEPL\s+TLEA, U32\b", r"B\.ASSEMBLE\s+1, 0,", r"B\.ASSEMBLE\s+0, 1,"):
+        if not re.search(pattern, text):
+            raise CheckError("four-PE concat gather missing native snapshot path")
+    if "<512B>" not in text or "<128 x float>" not in ir_text:
+        raise CheckError("four-PE concat gather changed original128 snapshot")
+    if re.search(r"extractelement|insertelement|@llvm\.vp\.|@llvm\.linx\.experimental\.element\.(region|view|gather)", ir_text):
+        raise CheckError("four-PE concat gather retains scalar/intermediate element effects")
+
+
+def validate_indexed_snapshot(text: str, ir_text: str | None) -> None:
+    for opcode in ("MGATHER", "TMOV", "TSTORE"):
+        if not re.search(rf"BSTART\.TLSU\s+{opcode}, FP16\b", text):
+            raise CheckError("indexed snapshot missing native FP16 " + opcode)
+    if len(re.findall(r"\bB\.ASSEMBLE\b", text)) < 2:
+        raise CheckError("indexed snapshot missing closed hierarchical snapshot")
+    if not re.search(r"\bB\.SUBVIEW\b", text):
+        raise CheckError("indexed snapshot missing borrowed output parts")
+    if not re.search(r"BSTART\.TEPL\s+TLEA, U32\b", text):
+        raise CheckError("indexed snapshot requires B32 indices to B64 byte offsets")
+    stores = re.findall(r"BSTART\.TLSU\s+TSTORE, FP16\b.*?(?=BSTART|\Z)", text, re.S)
+    if not stores or any("ExecMaskPresent" not in bundle for bundle in stores):
+        raise CheckError("indexed snapshot tail stores must retain execution masks")
+    if ir_text is None or not re.search(
+            r"call <64 x half> @llvm\.linx\.experimental\.ew\.mgather", ir_text):
+        raise CheckError("indexed snapshot missing native logical64 FP16 gather")
+    if re.search(r"extractelement|insertelement|@llvm\.vp\.|"
+                 r"@llvm\.linx\.experimental\.element\.(region|view|gather)", ir_text):
+        raise CheckError("indexed snapshot retains scalar or intermediate element effects")
+
+
 def validate(text: str, case: str, ir_text: str | None = None) -> None:
+    if case.startswith("broadcast_inline_s32_"):
+        validate_broadcast_inline(text, ir_text)
+        return
+    if case == "broadcast_fourpe":
+        validate_broadcast_fourpe(text, ir_text)
+        return
+    if case == "gather_fourpe" or case.startswith("gather_f32_"):
+        validate_gather_hierarchy(text, ir_text)
+        return
+    if case == "concat_gather_fourpe":
+        validate_concat_gather_fourpe(text, ir_text)
+        return
+    if case.startswith(("broadcast_f16_", "transpose_f16_")):
+        validate_indexed_snapshot(text, ir_text)
+        return
+    if case.startswith("concat_scatter_"):
+        validate_concat_scatter(text, case, ir_text)
+        return
     if case in ("elementwise_masked_gather_scatter",
                 "elementwise_masked_gather_scatter_strong"):
         validate_masked_gather_scatter_f32(text, ir_text)
@@ -1157,16 +1307,31 @@ def validate(text: str, case: str, ir_text: str | None = None) -> None:
         )
     if not subview:
         raise CheckError("missing TPARTVIEW/B.SUBVIEW lowering")
-    if len(masked_ior) != expected_sites:
+    if is_topk:
+        # Scalar >> and & expressions introduce their own masked arithmetic.
+        # Require the mask in each atomic bundle instead of counting all IORs.
+        for atomic_line in atomic:
+            start = lines.index(atomic_line)
+            end = next((i for i in range(start + 1, len(lines))
+                        if "BSTART." in lines[i]), len(lines))
+            binders = [line for line in lines[start + 1:end]
+                       if re.search(r"\bB\.IOR\b", line)]
+            if len(binders) != 1 or "ExecMaskPresent" not in binders[0]:
+                raise CheckError("atomic is missing its native execution mask")
+    elif len(masked_ior) != expected_sites:
         raise CheckError("atomic is missing its native execution mask")
     if not any(re.search(r"\bTLOAD\b", line) for line in lines):
         raise CheckError("missing pre-element TLOAD")
-    if not any(re.search(r"\bTANDS\b", line) for line in lines):
-        raise CheckError("missing pre-element TANDS")
-    if (case == "selected_radix_tile_element" or is_topk) and not any(
-        re.search(r"\bTSHRS\b", line) for line in lines
-    ):
-        raise CheckError("selected radix case is missing TSHRS")
+    if is_topk:
+        if not any(re.search(r"\bTANDS?\b", line) for line in lines) or not any(
+                re.search(r"\bTSHRS?\b", line) for line in lines):
+            raise CheckError("Top-K scalar bit expressions lost native lowering")
+    else:
+        if not any(re.search(r"\bTANDS\b", line) for line in lines):
+            raise CheckError("missing pre-element TANDS")
+        if case == "selected_radix_tile_element" and not any(
+                re.search(r"\bTSHRS\b", line) for line in lines):
+            raise CheckError("selected radix case is missing TSHRS")
     atomic_index = lines.index(atomic[0])
     if not is_topk and not any(
         re.search(r"\bTADDS\b", line) for line in lines[atomic_index + 1 :]
@@ -1232,6 +1397,59 @@ def main() -> int:
     try:
         validate(text, args.case, ir_text)
         if args.self_test:
+            if args.case.startswith("broadcast_inline_s32_"):
+                for opcode, dtype in (("MGATHER", "U32"), ("TSTORE", "S32")):
+                    rejected("missing " + opcode, text.replace(opcode + ", " + dtype, opcode + "_REMOVED, " + dtype), args.case, ir_text)
+                rejected("missing snapshot", text.replace("B.ASSEMBLE", "B.ASSEMBLE_REMOVED"), args.case, ir_text)
+                rejected("wrong index width", text.replace("TLEA, U32", "TLEA, U64"), args.case, ir_text)
+                print(f"{args.case}: disassembly check PASS")
+                return 0
+            if args.case == "broadcast_fourpe":
+                for opcode in ("TLOAD", "TSTORE"):
+                    rejected("missing " + opcode, text.replace(opcode + ", FP32", opcode + "_REMOVED, FP32"), args.case, ir_text)
+                print(f"{args.case}: disassembly check PASS")
+                return 0
+            if args.case == "gather_fourpe" or args.case.startswith("gather_f32_"):
+                for opcode in ("MGATHER", "MSCATTER"):
+                    rejected("missing " + opcode, text.replace(opcode + ", FP32", opcode + "_REMOVED, FP32"), args.case, ir_text)
+                for directive in ("B.ASSEMBLE", "B.SUBVIEW"):
+                    rejected("missing " + directive, text.replace(directive, directive + "_REMOVED"), args.case, ir_text)
+                rejected("wrong index width", text.replace("TLEA, U32", "TLEA, U64"), args.case, ir_text)
+                print(f"{args.case}: disassembly check PASS")
+                return 0
+            if args.case == "concat_gather_fourpe":
+                for opcode in ("MGATHER", "TSTORE"):
+                    rejected("missing " + opcode, text.replace(opcode + ", FP32", opcode + "_REMOVED, FP32"), args.case, ir_text)
+                rejected("missing LAST", text.replace("B.ASSEMBLE", "B.ASSEMBLE_REMOVED"), args.case, ir_text)
+                rejected("wrong index width", text.replace("TLEA, U32", "TLEA, U64"), args.case, ir_text)
+                print(f"{args.case}: disassembly check PASS")
+                return 0
+            if args.case.startswith(("broadcast_f16_", "transpose_f16_")):
+                for opcode in ("MGATHER", "TSTORE"):
+                    rejected("missing " + opcode, text.replace(opcode + ", FP16", opcode + "_REMOVED, FP16"), args.case, ir_text)
+                for directive in ("B.ASSEMBLE", "B.SUBVIEW"):
+                    rejected("missing " + directive, text.replace(directive, directive + "_REMOVED"), args.case, ir_text)
+                rejected("wrong index width", text.replace("TLEA, U32", "TLEA, U64"), args.case, ir_text)
+                rejected("unmasked tail", text.replace("ExecMaskPresent", "NoExecMask"), args.case, ir_text)
+                print(f"{args.case}: disassembly check PASS")
+                return 0
+            if args.case.startswith("concat_scatter_"):
+                dtype = "FP16" if "_f16_" in args.case else (
+                    "FP32" if args.case == "concat_scatter_fourpe" else "S32")
+                rejected("missing full input snapshot", text.replace(
+                    "TLOAD, " + dtype, "TLOAD_REMOVED, " + dtype, 1), args.case, ir_text)
+                rejected("missing borrowed snapshot", text.replace(
+                    "B.SUBVIEW", "B.SUBVIEW_REMOVED", 1), args.case, ir_text)
+                rejected("wrong index width", text.replace(
+                    "TLEA, U32", "TLEA, U64", 1), args.case, ir_text)
+                rejected("unmasked scatter", re.sub(
+                    rf"(BSTART\.TLSU\s+MSCATTER, {dtype}.*?)(?=BSTART|\Z)",
+                    lambda m: m[0].replace("ExecMaskPresent", "NoExecMask"),
+                    text, count=1, flags=re.S), args.case, ir_text)
+                rejected("numeric copy", text.replace(
+                    "TMOV, " + dtype, "TCVT, " + dtype, 1), args.case, ir_text)
+                print(f"{args.case}: disassembly check PASS")
+                return 0
             if args.case in ("elementwise_if_for", "elementwise_if_for_strong",
                              "elementwise_masked_gather_scatter",
                              "elementwise_masked_gather_scatter_strong"):
@@ -1683,7 +1901,16 @@ def main() -> int:
                 return 0
             rejected("missing TLEA", text.replace("TLEA, U32", "TLEA_REMOVED, U32", 1), args.case)
             rejected("extra atomic", text + "\n" + next(line for line in text.splitlines() if "MGATHER.ADD, U32" in line), args.case)
-            rejected("missing execution mask", text.replace("ExecMaskPresent", "NoExecMask", 1), args.case)
+            if args.case == "topk_boundaries" or args.case.startswith("topk_boundaries_"):
+                broken_mask = re.sub(
+                    r"(BSTART\.TLSU\s+MGATHER\.ADD, U32.*?)(?=BSTART|\Z)",
+                    lambda match: match[0].replace("ExecMaskPresent", "NoExecMask"),
+                    text, count=1, flags=re.S)
+                rejected("missing atomic execution mask", broken_mask, args.case)
+                rejected("missing scalar shift lowering", re.sub(r"\bTSHRS?\b", "TSHR_REMOVED", text), args.case)
+                rejected("missing scalar mask lowering", re.sub(r"\bTANDS?\b", "TAND_REMOVED", text), args.case)
+            else:
+                rejected("missing execution mask", text.replace("ExecMaskPresent", "NoExecMask", 1), args.case)
             post_op = (
                 "TSTORE" if (args.case == "topk_boundaries" or
                               args.case.startswith("topk_boundaries_"))

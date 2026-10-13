@@ -27,8 +27,8 @@
   "required_instructions": [
     "TLEA",
     "B.SUBVIEW",
-    "TSHRS",
-    "TANDS",
+    "TSHR (compiler lowering of scalar >>)",
+    "TAND (compiler lowering of scalar &)",
     "TCI",
     "TCMPS GPR",
     "scalar predicate AND",

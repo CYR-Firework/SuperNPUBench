@@ -379,7 +379,13 @@ def self_test(text: str) -> None:
     )
     for ordinal, segment in enumerate(atomic_segments(text)):
         compares = [inst for inst in segment if inst.mnemonic == "TCMPS"]
-        bior = next(inst for inst in segment
+        # Scalar expressions can add masked Tile arithmetic before TLEA.
+        # Mutation canaries must target the atomic bundle's binder, not an
+        # earlier arithmetic execution mask.
+        atomic_index = next(index for index, inst in enumerate(segment)
+                            if inst.mnemonic == "BSTART.TLSU" and
+                            "MGATHER.ADD" in inst.operands)
+        bior = next(inst for inst in segment[atomic_index + 1:]
                     if inst.mnemonic == "B.IOR" and "ExecMaskPresent" in inst.operands)
         mask_binder = re.search(r"\[([^,]+),([^,]+),([^\]]+)\]", bior.operands)
         assert mask_binder is not None

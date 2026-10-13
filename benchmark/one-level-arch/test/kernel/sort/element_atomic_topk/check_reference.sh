@@ -6,6 +6,8 @@ one_level_dir=$(cd "$case_dir/../../../.." && pwd)
 tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/element-atomic-topk.XXXXXX")
 trap 'rm -rf "$tmp_dir"' EXIT
 
+python3 "$case_dir/check_source.py"
+
 host_cxx=${CXX:-c++}
 common_flags=(-std=c++20 -Wall -Wextra -Werror -Wno-unknown-pragmas \
     -I "$one_level_dir")
