@@ -2,25 +2,22 @@
 #include "benchmark.h"
 #include "solution/qli/qli_pto_opt_simple.hpp"
 
-// P1 optimization: eliminate copy_bytes — pass .data segment absolute
-// addresses directly to the kernel. The kernel's global_tensor + TLOAD
-// can read from any mapped address, avoiding the byte-by-byte scalar copy
-// that generated ~1.14M STD blocks (92.8% of total).
-//
-// Addresses updated via llvm-nm after each relink (same as qli_check.cpp).
-#define SRCQ_ADDR  0x0000000000014608ULL
-#define SRCK_ADDR  0x0000000000094608ULL
-#define SRCW_ADDR  0x0000000000098608ULL
-#define SRCSQ_ADDR  0x000000000009c608ULL
-#define SRCSK_ADDR  0x00000000000a0608ULL
+// 输入地址由链接器解析，修改 kernel 大小后无需重新修补常量地址。
+extern "C" {
+extern unsigned char _binary_srcq_data_start[];
+extern unsigned char _binary_srck_data_start[];
+extern unsigned char _binary_srcw_data_start[];
+extern unsigned char _binary_srcsq_data_start[];
+extern unsigned char _binary_srcsk_data_start[];
+}
 
 #define OUT_SCORES  0x4000802000ULL
 // indices 紧随 scores 之后，避免大 Sq*Skv 时与 scores 区域重叠
 #define OUT_INDICES (0x4000802000ULL + (uint64_t)Sq * Skv * 4)
 
 // 尊重 Makefile -DBatch=$(B)；未定义时默认 1
-#ifndef B
-#define B 1
+#ifndef Batch
+#define Batch 1
 #endif
 
 #ifndef Tsq
@@ -67,17 +64,24 @@
 #define DTYPE __fp8_e4m3
 #endif
 
+static_assert(Batch == 1, "original QLI driver supports exactly one batch");
+static_assert(Sq > 0 && Skv > 0 && g > 0 && kTm > 0 && kTk > 0,
+              "QLI dimensions must be positive");
+static_assert(Skv % kTk == 0,
+              "Skv must be divisible by the key tile width");
+static_assert(g % kTm == 0 && kTm <= 32,
+              "g must be divisible by kTm and kTm must be at most 32");
+static_assert(topK > 0 && topK <= Skv,
+              "topK must be in the range 1..Skv");
+
 int main(){
     using dtype = DTYPE;
 
-    // P1: No copy_bytes — pass .data segment addresses directly.
-    // The kernel's global_tensor accepts raw pointers; TLOAD reads from
-    // the mapped .data region without needing aligned stack buffers.
-    dtype*   q       = reinterpret_cast<dtype*>(SRCQ_ADDR);
-    dtype*   k       = reinterpret_cast<dtype*>(SRCK_ADDR);
-    float*   w       = reinterpret_cast<float*>(SRCW_ADDR);
-    float*   scale_q = reinterpret_cast<float*>(SRCSQ_ADDR);
-    float*   scale_k = reinterpret_cast<float*>(SRCSK_ADDR);
+    dtype*   q       = reinterpret_cast<dtype*>(_binary_srcq_data_start);
+    dtype*   k       = reinterpret_cast<dtype*>(_binary_srck_data_start);
+    float*   w       = reinterpret_cast<float*>(_binary_srcw_data_start);
+    float*   scale_q = reinterpret_cast<float*>(_binary_srcsq_data_start);
+    float*   scale_k = reinterpret_cast<float*>(_binary_srcsk_data_start);
 
     // v0.58.4：W*scale_q 预广播为 [Sq*g, kTk]（行 r 全列同值），
     // kernel 内用普通 TMUL（规避单列广播源的物理列校验）
@@ -94,7 +98,7 @@ int main(){
     static float tmp16[kTm * kTk];
 
     BENCHSTART;
-    for(int i=0;i<B;i++){
+    for(int i=0;i<Batch;i++){
         qli_pto<dtype, Sq, Skv, D, g, kTm, kTk>(
             reinterpret_cast<float*>(OUT_SCORES) + i*Sq*Skv,
             q + i*Sq*g*D,
@@ -108,7 +112,7 @@ int main(){
 
     // Step7 (TopK) 独立计时区间
     __asm__ __volatile__("B.HINT TRACE.begin\n" : : :);
-    for(int i=0;i<B;i++){
+    for(int i=0;i<Batch;i++){
         qli_topk_radix<Sq, Skv, topK>(
             reinterpret_cast<float*>(OUT_SCORES) + i*Sq*Skv,
             reinterpret_cast<int32_t*>(OUT_INDICES) + i*Sq*topK
