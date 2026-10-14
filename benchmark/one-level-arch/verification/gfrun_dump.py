@@ -9,8 +9,10 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 
 MAX_DUMP_BYTES = 16 * 1024 * 1024
+GFRUN_TIMEOUT_SECONDS = 120
 
 
 def plan_dump(dump_range: str, output: Path) -> list[dict[str, object]]:
@@ -79,13 +81,26 @@ def main() -> int:
     if output.exists():
         raise FileExistsError(str(output))
     (output.parent / "gfrun.argv").write_text(shlex.join(command) + "\n")
+    started = time.monotonic()
     with (output.parent / "gfrun.log").open("w") as log:
-        result = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT)
-    (output.parent / "gfrun.exit").write_text(str(result.returncode) + "\n")
-    if result.returncode != 0:
-        print(f"gfrun exited with {result.returncode}; see {output.parent / 'gfrun.log'}",
+        try:
+            result = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT,
+                                    timeout=GFRUN_TIMEOUT_SECONDS)
+            exit_code = result.returncode
+            timed_out = False
+        except subprocess.TimeoutExpired:
+            exit_code = 124
+            timed_out = True
+    (output.parent / "gfrun.exit").write_text(str(exit_code) + "\n")
+    (output.parent / "gfrun-run.json").write_text(json.dumps({
+        "elapsed_seconds": time.monotonic() - started,
+        "timeout_seconds": GFRUN_TIMEOUT_SECONDS,
+        "timed_out": timed_out, "exit_code": exit_code,
+    }, indent=2) + "\n")
+    if exit_code != 0:
+        print(f"gfrun exited with {exit_code}; see {output.parent / 'gfrun.log'}",
               file=sys.stderr)
-        return 1
+        return exit_code if timed_out else 1
     assemble_dump(chunks, output)
     return 0
 

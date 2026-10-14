@@ -97,6 +97,21 @@ def write_u16_array(path: Path, values: array) -> None:
         little_endian.tofile(stream)
 
 
+def write_linked_fixture(out: Path, prefix: str, include: str,
+                         buffers: list[tuple[str, int, str]]) -> None:
+    assembly = ['.pushsection .data,"aw",@progbits']
+    for name, alignment, filename in buffers:
+        path = (out / filename).resolve()
+        if '"' in str(path) or '\n' in str(path):
+            raise ValueError('unsupported linked fixture path')
+        symbol = prefix + name
+        assembly += [f'.balign {alignment}', f'.global {symbol}',
+                     f'.type {symbol},@object', symbol + ':',
+                     f'.incbin "{path}"', f'.size {symbol},.-{symbol}']
+    assembly += ['.popsection']
+    (out / include).write_text('asm(R"pto(\n' + '\n'.join(assembly) + '\n)pto");\n')
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--case", required=True, choices=(
@@ -639,6 +654,9 @@ def main() -> int:
         values = array(code, ((i * multiplier + bias) & mask
                               for i in range(input_count)))
         output = array(code, [guard]) * output_count
+        if fp16:
+            write_u16_array(args.out / 'input_seed.bin', values)
+            write_u16_array(args.out / 'output_seed.bin', output)
         if alias:
             # Independent [N,rows,cols] -> [rows,N,cols] enumeration. Each
             # original512 batch snapshots evolving memory before its stores.
@@ -672,6 +690,15 @@ def main() -> int:
             (args.out / filename).write_bytes(data.tobytes())
             segments.append({"symbol": "concat_scatter_" + name,
                              "kind": "exact", "file": filename})
+        if fp16:
+            write_linked_fixture(args.out, 'concat_scatter_',
+                                 'concat_scatter_f16_input.inc', [
+                ('input', 4096, 'input_seed.bin'),
+                ('output_guard_before', 64, 'output_guard_before.bin'),
+                ('output', 64, 'output_seed.bin'),
+                ('output_guard_after', 64, 'output_guard_after.bin'),
+                ('in_shape', 32, 'in_shape.bin'),
+                ('out_shape', 32, 'out_shape.bin')])
         status = [0, input_count, output_count, processed, 512, rows, columns,
                   tensors * columns, tensors, int(alias),
                   alias_offset if alias else 0, 0x43534331]
@@ -764,6 +791,11 @@ def main() -> int:
             ((element * 40503 + 0x35A7) & 0xFFFF
              for element in range(input_count)),
         )
+        # Seed the actual ELF independently of post-execution alias goldens.
+        # The host oracle below still observes every input and output byte.
+        write_u16_array(args.out / "input_seed_u16.bin", input_values)
+        write_u16_array(args.out / "output_seed_u16.bin",
+                        array("H", [guard]) * output_count)
         concatenated = array("H")
         for row in range(rows):
             for tensor in range(tensors):
@@ -804,6 +836,14 @@ def main() -> int:
             (args.out / filename).write_bytes(struct.pack("<8Q", *shape))
             segments.append({"symbol": prefix + name, "kind": "exact",
                              "file": filename})
+
+        write_linked_fixture(args.out, prefix, 'concat_gather_f16_input.inc', [
+            ("input", 4096, 'input_seed_u16.bin'),
+            ("output_guard_before", 64, 'output_guard_before_u16.bin'),
+            ("output", 64, 'output_seed_u16.bin'),
+            ("output_guard_after", 64, 'output_guard_after_u16.bin'),
+            ("in_shape", 32, 'in_shape.bin'),
+            ("out_shape", 32, 'out_shape.bin')])
 
         (args.out / "manifest.json").write_text(json.dumps({
             "case": args.case,

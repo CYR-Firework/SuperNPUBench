@@ -53,17 +53,28 @@ Bits get_bits(const Value &value) {
 
 // 原 driver 的输入未初始化、文件读取关闭。本 fixture 保留完整分配，
 // 使用确定性原始位；FP16 包含非有限值、subnormal 与正负零。
+#ifdef CONCAT_SCATTER_F16_LINKED_INPUTS
+static_assert(CONCAT_SCATTER_FP16 == 1);
+#define CSF16_DATA_DECL extern
+#else
+#define CSF16_DATA_DECL
+#endif
 extern "C" {
-alignas(4096) Value concat_scatter_input[kInputElements];
-alignas(64) Value concat_scatter_output_guard_before[kGuardElements];
-alignas(64) Value concat_scatter_output[kOutputElements];
-alignas(64) Value concat_scatter_output_guard_after[kGuardElements];
-alignas(32) size_t concat_scatter_in_shape[8];
-alignas(32) size_t concat_scatter_out_shape[8];
+alignas(4096) CSF16_DATA_DECL Value concat_scatter_input[kInputElements];
+alignas(64) CSF16_DATA_DECL Value concat_scatter_output_guard_before[kGuardElements];
+alignas(64) CSF16_DATA_DECL Value concat_scatter_output[kOutputElements];
+alignas(64) CSF16_DATA_DECL Value concat_scatter_output_guard_after[kGuardElements];
+alignas(32) CSF16_DATA_DECL size_t concat_scatter_in_shape[8];
+alignas(32) CSF16_DATA_DECL size_t concat_scatter_out_shape[8];
 alignas(32) uint32_t concat_scatter_status[12];
 }
+#undef CSF16_DATA_DECL
+#ifdef CONCAT_SCATTER_F16_LINKED_INPUTS
+#include "concat_scatter_f16_input.inc"
+#endif
 
 int main() {
+#ifndef CONCAT_SCATTER_F16_LINKED_INPUTS
   for (uint32_t i = 0; i < kInputElements; ++i)
     set_bits(concat_scatter_input[i], fixture(i));
   for (uint32_t i = 0; i < kOutputElements; ++i)
@@ -76,6 +87,7 @@ int main() {
   concat_scatter_in_shape[1] = kColumns;
   concat_scatter_out_shape[0] = kRows;
   concat_scatter_out_shape[1] = 1000 * kColumns;
+#endif
 
   BENCHSTART;
   // alias 探针保留完整容量，连续处理两个512元素批次。第一个批次会覆盖

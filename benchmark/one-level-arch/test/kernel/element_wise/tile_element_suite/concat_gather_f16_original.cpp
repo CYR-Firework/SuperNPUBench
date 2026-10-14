@@ -64,21 +64,32 @@ inline uint32_t source_element(uint32_t global) {
 
 using namespace concat_gather_f16_original_benchmark;
 
+#ifdef CONCAT_GATHER_F16_LINKED_INPUTS
+#define CGF16_DATA_DECL extern
+#else
+#define CGF16_DATA_DECL
+#endif
 extern "C" {
-alignas(4096) __half concat_gather_f16_original_input[kInputElements];
-alignas(64) __half
+alignas(4096) CGF16_DATA_DECL __half concat_gather_f16_original_input[kInputElements];
+alignas(64) CGF16_DATA_DECL __half
     concat_gather_f16_original_output_guard_before[kGuardElements];
-alignas(64) __half concat_gather_f16_original_output[kOutputElements];
-alignas(64) __half
+alignas(64) CGF16_DATA_DECL __half concat_gather_f16_original_output[kOutputElements];
+alignas(64) CGF16_DATA_DECL __half
     concat_gather_f16_original_output_guard_after[kGuardElements];
-alignas(32) std::size_t
+alignas(32) CGF16_DATA_DECL std::size_t
     concat_gather_f16_original_in_shape[kMaxDimensions];
-alignas(32) std::size_t
+alignas(32) CGF16_DATA_DECL std::size_t
     concat_gather_f16_original_out_shape[kMaxDimensions];
 alignas(32) uint32_t concat_gather_f16_original_status[14];
 }
+#undef CGF16_DATA_DECL
+
+#ifdef CONCAT_GATHER_F16_LINKED_INPUTS
+#include "concat_gather_f16_input.inc"
+#endif
 
 int main() {
+#ifndef CONCAT_GATHER_F16_LINKED_INPUTS
   for (std::size_t element = 0; element < kInputElements; ++element) {
     store_bits(concat_gather_f16_original_input[element], input_bits(element));
   }
@@ -99,6 +110,7 @@ int main() {
   concat_gather_f16_original_in_shape[1] = 8;
   concat_gather_f16_original_out_shape[0] = 256;
   concat_gather_f16_original_out_shape[1] = 8000;
+#endif
 
   BENCHSTART;
   if constexpr (kAliasProbe) {
@@ -120,6 +132,15 @@ int main() {
   }
   BENCHEND;
 
+#ifdef CONCAT_GATHER_F16_LINKED_INPUTS
+  // This mode records call completion only. The suite's host-side oracle
+  // compares the full buffers, including all unused input, guards and shapes;
+  // a zero return/status alone does not establish correctness.
+  const uint32_t output_failures = 0;
+  const uint32_t guard_failures = 0;
+  const uint32_t input_failures = 0;
+  const uint32_t shape_failures = 0;
+#else
   uint32_t output_failures = 0;
   for (uint32_t global = 0; global < kOutputElements; ++global) {
     const uint16_t expected = input_bits(source_element(global));
@@ -170,6 +191,7 @@ int main() {
     shape_failures += concat_gather_f16_original_in_shape[dimension] != 0;
     shape_failures += concat_gather_f16_original_out_shape[dimension] != 0;
   }
+#endif
 
   const uint32_t failures = output_failures + guard_failures + input_failures +
                             shape_failures;

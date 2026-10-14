@@ -196,6 +196,18 @@ ifneq ($(filter gather_f32_3_%,$(TESTCASE)),)
 CC_LINK += -Wl,--image-base=0x20000000
 endif
 INCLUDE += -I$(API_INCLUDE)
+ifneq ($(filter concat_gather_f16_original concat_gather_f16_alias_probe,$(TESTCASE)),)
+ifneq ($(ELEMENT_FIXTURE_DIR),)
+DEFINES += -DCONCAT_GATHER_F16_LINKED_INPUTS=1
+INCLUDE += -I$(ELEMENT_FIXTURE_DIR)
+endif
+endif
+ifneq ($(filter concat_scatter_f16_original concat_scatter_f16_alias_probe,$(TESTCASE)),)
+ifneq ($(ELEMENT_FIXTURE_DIR),)
+DEFINES += -DCONCAT_SCATTER_F16_LINKED_INPUTS=1
+INCLUDE += -I$(ELEMENT_FIXTURE_DIR)
+endif
+endif
 
 include ../../../common/Makefile.common
 

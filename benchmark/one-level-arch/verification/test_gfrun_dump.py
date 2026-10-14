@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 import tempfile
+import json
+import subprocess
+import sys
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from gfrun_dump import MAX_DUMP_BYTES, assemble_dump, dump_specs, plan_dump
+from gfrun_dump import MAX_DUMP_BYTES, assemble_dump, dump_specs, plan_dump, main
 
 
 class DumpPlanTest(unittest.TestCase):
@@ -67,6 +70,31 @@ class DumpPlanTest(unittest.TestCase):
                 assemble_dump(chunks, output)
             self.assertEqual(temporary.read_bytes(), b"preserve")
             self.assertFalse(output.exists())
+
+    def test_timeout_never_assembles_even_complete_partial_dumps(self):
+        with tempfile.TemporaryDirectory() as directory, patch("gfrun_dump.MAX_DUMP_BYTES", 2):
+            root = Path(directory)
+            output = root / 'gfrun.mem'
+            chunks = plan_dump('0x1000:4', output)
+            command = ['gfrun', '--dump-memory', *dump_specs(chunks), '-f', 'kernel.elf']
+            provenance = root / 'provenance.json'
+            provenance.write_text(json.dumps({
+                'target': {'gfrun_memory_dump': {
+                    'range': '0x1000:4', 'output': str(output), 'chunks': chunks}},
+                'commands': {'gfrun': command}}))
+
+            def timeout(*args, **kwargs):
+                self.assertEqual(kwargs['timeout'], 120)
+                for chunk in chunks:
+                    Path(chunk['path']).write_bytes(b'ab')
+                raise subprocess.TimeoutExpired(command, 120)
+
+            with patch.object(sys, 'argv', ['gfrun_dump.py', '--provenance', str(provenance)]), \
+                    patch('gfrun_dump.subprocess.run', side_effect=timeout):
+                self.assertEqual(main(), 124)
+            self.assertFalse(output.exists())
+            self.assertEqual((root / 'gfrun.exit').read_text(), '124\n')
+            self.assertTrue(json.loads((root / 'gfrun-run.json').read_text())['timed_out'])
 
 
 if __name__ == "__main__":

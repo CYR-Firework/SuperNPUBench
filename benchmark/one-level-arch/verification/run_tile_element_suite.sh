@@ -175,6 +175,10 @@ python3 "$case_dir/test_check_disassembly_scope.py" 2>&1 \
     | tee "$artifact_dir/disassembly-scope-self-test.log"
 python3 "$case_dir/test_concat_scatter_partition.py" 2>&1 \
     | tee "$artifact_dir/concat-scatter-partition-self-test.log"
+python3 "$case_dir/test_concat_gather_f16_seed.py" 2>&1 \
+    | tee "$artifact_dir/concat-f16-seed-self-test.log"
+python3 "$script_dir/test_gfrun_dump.py" 2>&1 \
+    | tee "$artifact_dir/gfrun-dump-self-test.log"
 python3 "$bench_root/test/kernel/sort/element_atomic_topk/test_write_provenance.py" 2>&1 \
     | tee "$artifact_dir/provenance-self-test.log"
 python3 "$case_dir/test_broadcast_golden.py" 2>&1 \
@@ -209,6 +213,7 @@ run_case() {
         SYSROOT="$SYSROOT" \
         RESOURCE_DIR="$RESOURCE_DIR" \
         API_INCLUDE="$installed_api_include" \
+        ELEMENT_FIXTURE_DIR="$golden" \
         clean all 2>&1 | tee "$case_artifact/build.log"
     cp "$built_dir/$case_name.elf" "$elf"
     if [[ "$case_name" == gather_v2_* || "$case_name" == view_copy_* || "$case_name" == broadcast_inline_s32_* || "$case_name" == gather_f32_* || "$case_name" == transpose_f16_* || "$case_name" == broadcast_f16_* || "$case_name" == signed_element_expression ||
@@ -242,6 +247,7 @@ run_case() {
             SYSROOT="$SYSROOT" \
             RESOURCE_DIR="$RESOURCE_DIR" \
             API_INCLUDE="$installed_api_include" \
+            ELEMENT_FIXTURE_DIR="$golden" \
             IR_TARGET="$ir" ir 2>&1 | tee "$case_artifact/ir-build.log"
     fi
     "$COMPILER_DIR/llvm-objdump" -dl \
