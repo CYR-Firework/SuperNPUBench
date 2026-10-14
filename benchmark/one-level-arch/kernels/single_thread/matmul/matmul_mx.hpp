@@ -39,10 +39,11 @@ using TileAcc = std::conditional_t<
     (R_ <= 16), CubeAccumulatorM16<E_, R_, C_, VR_, VC_>,
     CubeAccumulatorM32<E_, R_, C_, VR_, VC_>>;
 
-// Current HiF4 Matrix-MX contract.  Tile dimensions stay in logical lanes;
-// the __fp4_hif4x2 carrier only changes the number of bytes used in GM.
-// Local scale operands remain Location::Scaling/RowMajor, matching the
-// TileOP Matrix-MX interface: A scale is [M,K/64], B scale is [K/64,N].
+// GM scales retain A [M,K/64] and B [K/64,N]. Local scale
+// descriptors are CUBE_M32 [M,K/64] and [N,K/64]. A native scale
+// descriptor has at most 32 rows, so each requested N tile consists of
+// 32-column operations; their total B, scale-B and result capacities equal
+// the original requested tile capacities.
 template <const int gM, const int gN, const int gK, const int tM,
           const int tN, const int tK, bool ReuseA = false>
 void matmul_hif4x2_mx(float *dst, __fp4_hif4x2 *src0,
@@ -50,104 +51,115 @@ void matmul_hif4x2_mx(float *dst, __fp4_hif4x2 *src0,
                       uint32_t *src1_mx) {
   static_assert(gM % tM == 0 && gN % tN == 0 && gK % tK == 0,
                 "HiF4 single-thread matmul currently requires full tiles");
-  static_assert(tM == 16 || tM == 32,
-                "local CUBE matmul supports M16/M32 output cells");
-  static_assert(gK % 64 == 0 && tK % 64 == 0,
-                "HiF4 Matrix-MX uses U32 scales in groups of 64 K lanes");
-  static_assert(gK % 2 == 0 && tK % 2 == 0 && gN % 2 == 0,
-                "HiF4x2 packed storage requires even matrix extents");
+  static_assert(tM == 16 || tM == 32);
+  static_assert(gK % 64 == 0 && tK % 64 == 0);
+  static_assert(tN >= 32 && tN % 32 == 0,
+                "HiF4 Local scale-B uses complete 32-column native operations");
+  constexpr uint32_t NativeN = 32;
+  constexpr uint32_t PartsN = tN / NativeN;
+  constexpr uint32_t ScaleK = tK / 64;
+  constexpr uint32_t GlobalScaleK = gK / 64;
+  constexpr int Mb = gM / tM, Nb = gN / tN, Kb = gK / tK;
+  using A = CubeTileA<__fp4_hif4x2, tM, tK>;
+  using B = CubeTileN8<__fp4_hif4x2, tK, NativeN>;
+  using C = TileAcc<float, tM, NativeN>;
+  using AScale = Tile<Location::Scaling, uint32_t, 32, ScaleK,
+                      BLayout::CubeM32, tM, ScaleK>;
+  using BScale = Tile<Location::Scaling, uint32_t, 32, ScaleK,
+                      BLayout::CubeM32>;
+  using ByteOffsets = ElementTile<uint64_t, 32 * ScaleK>;
+  static_assert(B::LogicalTileBytes * PartsN == tK * tN / 2);
+  static_assert(BScale::LogicalTileBytes * PartsN == ScaleK * tN * 4);
+  static_assert(C::LogicalTileBytes * PartsN == tM * tN * 4);
 
-  constexpr int Mb = gM / tM;
-  constexpr int Nb = gN / tN;
-  constexpr int Kb = gK / tK;
-  constexpr int kScaleK = tK / 64;
-  constexpr int kGlobalScaleK = gK / 64;
-
-  using tileA = CubeTileA<__fp4_hif4x2, tM, tK>;
-  using tileB = CubeTileN8<__fp4_hif4x2, tK, tN>;
-  using tileC = TileAcc<float, tM, tN>;
-  using tileAScale =
-      Tile<Location::Scaling, uint32_t, tM, kScaleK,
-           BLayout::RowMajor>;
-  using tileBScale =
-      Tile<Location::Scaling, uint32_t, kScaleK, tN,
-           BLayout::RowMajor>;
-
-  using gmC = global_tensor<float, RowMajor<gM, gN>>;
-  using itC = global_iterator<gmC, tileC>;
-  itC gCIter(dst);
-
-  auto load_a = [&](tileA &a, tileAScale &sa, int i, int k) {
-    using gmABlock = global_tensor<
-        __fp4_hif4x2, MatrixLayout<tM, tK, gK, 1>>;
-    using gmAScaleBlock = global_tensor<
-        uint32_t, MatrixLayout<tM, kScaleK, kGlobalScaleK, 1>>;
-    // C++ pointers address packed bytes, while MatrixLayout strides and Tile
-    // dimensions are expressed in logical four-bit lanes.
-    gmABlock gA(src0 + (i * tM * gK + k * tK) / 2);
-    gmAScaleBlock gAS(src0_mx + i * tM * kGlobalScaleK +
-                      k * kScaleK);
-    TLOAD_CUBE(a, gA);
-    TLOAD(sa, gAS);
+  static_assert(uint64_t(ScaleK) * gN * sizeof(uint32_t) <= 0x7fffffff,
+                "scale gather offsets must have a proved signed-B32 lane range");
+  TileArray<ElementTile<uint64_t, 32>, 1, ScaleK> offset_parts;
+  for (uint32_t group = 0; group < ScaleK; ++group) {
+    const uint32_t group_base = group * uint32_t(gN);
+    ElementTile<uint64_t, 32> part;
+    auto &offsets = TPARTELEMENT(part);
+#pragma pto element for
+    for (uint32_t element = 0; element < 32; ++element) {
+      const uint32_t source_lane = group_base + element;
+      const uint64_t byte_offset =
+          uint64_t(source_lane) * uint64_t(sizeof(uint32_t));
+      offsets[element] = byte_offset;
+    }
+    TMOV(offset_parts[0][group], part);
+  }
+  auto scale_offsets = TASSEMBLY<ByteOffsets>(std::move(offset_parts));
+  auto load_a = [&](A &a, AScale &scale, int i, int k) {
+    global_tensor<__fp4_hif4x2, MatrixLayout<tM, tK, gK, 1>>
+        ga(src0 + (i * tM * gK + k * tK) / 2);
+    global_tensor<uint32_t, MatrixLayout<tM, ScaleK, GlobalScaleK, 1>>
+        gs(src0_mx + i * tM * GlobalScaleK + k * ScaleK);
+    TLOAD_CUBE(a, ga);
+    TLOAD_CUBE(scale, gs);
   };
-
-  auto load_b = [&](tileB &b, tileBScale &sb, int j, int k) {
-    using gmBBlock = global_tensor<
-        __fp4_hif4x2, MatrixLayout<tK, tN, gN, 1>>;
-    using gmBScaleBlock = global_tensor<
-        uint32_t, MatrixLayout<kScaleK, tN, gN, 1>>;
-    gmBBlock gB(src1 + (k * tK * gN + j * tN) / 2);
-    gmBScaleBlock gBS(src1_mx + k * kScaleK * gN + j * tN);
-    TLOAD_CUBE(b, gB);
-    TLOAD(sb, gBS);
+  auto load_b = [&](B &b, BScale &scale, int j, int part, int k) {
+    const uint64_t column = uint64_t(j) * tN + uint64_t(part) * NativeN;
+    global_tensor<__fp4_hif4x2, MatrixLayout<tK, NativeN, gN, 1>>
+        gb(src1 + (uint64_t(k) * tK * gN + column) / 2);
+    global_tensor<uint32_t, RowMajor<ScaleK, gN>>
+        gs(src1_mx + uint64_t(k) * ScaleK * gN + column);
+    TLOAD_CUBE(b, gb);
+    // Each byte offset selects GM[group, column] into Local[column, group].
+    MGATHER(scale, gs, scale_offsets);
   };
-
 #pragma clang loop unroll(full)
   for (int i = 0; i < Mb; ++i) {
     if constexpr (ReuseA) {
-      tileA cachedA[Kb];
-      tileAScale cachedAScale[Kb];
+      A cached_a[Kb];
+      AScale cached_scale[Kb];
 #pragma clang loop unroll(full)
       for (int k = 0; k < Kb; ++k)
-        load_a(cachedA[k], cachedAScale[k], i, k);
-
+        load_a(cached_a[k], cached_scale[k], i, k);
 #pragma clang loop unroll(full)
       for (int j = 0; j < Nb; ++j) {
-        tileC c;
+        C result[PartsN];
 #pragma clang loop unroll(full)
         for (int k = 0; k < Kb; ++k) {
-          tileB b;
-          tileBScale sb;
-          load_b(b, sb, j, k);
-          if (k == 0)
-            TMATMUL_MX(c, cachedA[k], cachedAScale[k], b, sb,
-                       fixp::keep_acc());
-          else
-            TMATMUL_MX_ACC(c, c, cachedA[k], cachedAScale[k], b, sb,
-                           fixp::keep_acc());
+          B b[PartsN];
+          BScale scale[PartsN];
+          for (uint32_t part = 0; part < PartsN; ++part) {
+            load_b(b[part], scale[part], j, part, k);
+            if (k == 0)
+              TMATMUL_MX(result[part], cached_a[k], cached_scale[k], b[part], scale[part], fixp::keep_acc());
+            else
+              TMATMUL_MX_ACC(result[part], result[part], cached_a[k], cached_scale[k], b[part], scale[part], fixp::keep_acc());
+          }
         }
-        auto gC = gCIter(i, j);
-        TSTORE_CUBE(gC, c);
+        for (uint32_t part = 0; part < PartsN; ++part) {
+          global_tensor<float, MatrixLayout<tM, NativeN, gN, 1>>
+              gc(dst + uint64_t(i) * tM * gN + uint64_t(j) * tN + part * NativeN);
+          TSTORE_CUBE(gc, result[part]);
+        }
       }
     } else {
 #pragma clang loop unroll(full)
       for (int j = 0; j < Nb; ++j) {
-        tileC c;
+        C result[PartsN];
 #pragma clang loop unroll(full)
         for (int k = 0; k < Kb; ++k) {
-          tileA a;
-          tileAScale sa;
-          tileB b;
-          tileBScale sb;
-          load_a(a, sa, i, k);
-          load_b(b, sb, j, k);
-          if (k == 0)
-            TMATMUL_MX(c, a, sa, b, sb, fixp::keep_acc());
-          else
-            TMATMUL_MX_ACC(c, c, a, sa, b, sb, fixp::keep_acc());
+          A a;
+          AScale a_scale;
+          B b[PartsN];
+          BScale b_scale[PartsN];
+          load_a(a, a_scale, i, k);
+          for (uint32_t part = 0; part < PartsN; ++part) {
+            load_b(b[part], b_scale[part], j, part, k);
+            if (k == 0)
+              TMATMUL_MX(result[part], a, a_scale, b[part], b_scale[part], fixp::keep_acc());
+            else
+              TMATMUL_MX_ACC(result[part], result[part], a, a_scale, b[part], b_scale[part], fixp::keep_acc());
+          }
         }
-        auto gC = gCIter(i, j);
-        TSTORE_CUBE(gC, c);
+        for (uint32_t part = 0; part < PartsN; ++part) {
+          global_tensor<float, MatrixLayout<tM, NativeN, gN, 1>>
+              gc(dst + uint64_t(i) * tM * gN + uint64_t(j) * tN + part * NativeN);
+          TSTORE_CUBE(gc, result[part]);
+        }
       }
     }
   }
@@ -1414,221 +1426,75 @@ void matmul_fp_notcvt(float *dst, dtypeA *src0, dtypeB *src1, uint8_t *src0_mx, 
   }
 }
 
-template<is_tile_data_v PsumTile, is_tile_data_v ScaleTile, is_tile_data_v OutTile>
-void dequant_acc_pto(OutTile &out, PsumTile &data, ScaleTile &scale, OutTile &adder) {
-    OutTile scaled;
-    TCOLEXPANDMUL(scaled, data, scale);
-    TADD(out, scaled, adder);
-}
-
 // mixed precision matmul dequant(A*B)， fp4x2 width_factor: 2
 template <typename dtypeA, typename dtypeB, const int gM, const int gN, const int gK, const int tM, const int tN, const int tK, const int width_factor>
 void matmul_mp(float *acc_ptr, dtypeA *a_ptr, dtypeB *b_ptr, float *c_ptr) {
-  static_assert(gK % (128) == 0);
+  static_assert(gM % tM == 0 && gN % tN == 0 && gK % tK == 0,
+                "A16W4 original profiles use complete matrix tiles");
   static_assert(tK == 128);
-  static const uint32_t trow = (tM >= 16) ? tM : 16;
-  static const uint32_t tcol = (tN >= 16) ? tN : 16;
-  using gm_shapeA = global_tensor<dtypeA, RowMajor<gM, gK>>;
-  using gm_shapeB = global_tensor<dtypeB, RowMajor<gK/width_factor, gN>>;
-  // 伪量化固定float, group 大小128， 128个fp4共享一个scaling factor, 128的partial sum* scale
-  using gm_shape_scale = global_tensor<float, RowMajor<gK/128, gN>>;
-  using gm_shapeACC = global_tensor<float, RowMajor<gM, gN>>;
-  using tile_shapeA = CubeTileA<dtypeA, trow, tK, tM, tK>;
-  // Cube descriptors express K in logical scalar elements. Packed FP4x2
-  // changes GM storage density, but must not halve the matrix-contract K.
-  using tile_shapeB = CubeTileN8<dtypeB, tK, tcol, tK, tcol>;
-  // A scale block has only one logical row when tK=128. Pad the physical
-  // tile to 8 rows so TLOAD reaches the ISA minimum active size of 512 B.
-  using tile_shape_scale =
-      Tile<Location::Vec, float, 8, tcol, BLayout::RowMajor, tK/128, tN>;
-  using tile_shape_dequant = Tile<Location::Vec, float, trow, tcol, BLayout::RowMajor, tM, tN>;
-  using tile_shapeACC = TileAcc<float, trow, tcol, tM, tN>;
-  // copy of acc, input as vector
-  using tile_ACCin = Tile<Location::Vec, float, trow, tcol, BLayout::ColMajor, tM, tN>;
+  static_assert(tM == 16 && tN == 16 && width_factor == 2,
+                "A16W4 native dequantization is defined for 16x16 cells");
+  constexpr int HalfN = 8;
+  constexpr int Mb = gM / tM;
+  constexpr int Nb = gN / tN;
+  constexpr int Kb = gK / tK;
 
-  using itA = global_iterator<gm_shapeA, tile_shapeA>;
-  using itB = global_iterator<gm_shapeB, tile_shapeB>;
-  using itScale = global_iterator<gm_shape_scale, tile_shape_scale>;
-  using itACC = global_iterator<gm_shapeACC, tile_shapeACC>;
+  using A = CubeTileA<dtypeA, tM, tK>;
+  using B = CubeTileN8<dtypeB, tK, tN>;
+  using Acc = CubeAccumulatorM16<float, tM, tN>;
+  using AccHalf = CubeAccumulatorM16<float, tM, HalfN>;
+  using ScaleHalf =
+      Tile<Location::Vec, float, tM, HalfN, BLayout::CubeM16, 1, HalfN>;
+  using ResultHalf =
+      Tile<Location::Vec, float, tM, HalfN, BLayout::CubeM16>;
 
-  itA gAIter(a_ptr);
-  itB gBIter(b_ptr);
-  itScale gScaleIter(c_ptr);
-  itACC gACCIter(acc_ptr);
+  static_assert(Acc::LogicalTileBytes == 1024);
+  static_assert(AccHalf::LogicalTileBytes == 512);
+  static_assert(ScaleHalf::LogicalTileBytes == 512);
+  static_assert(ResultHalf::LogicalTileBytes == 512);
 
-  const int Mb = gM / tM;
-  const int Nb = gN / tN;
-  const int Kb = gK / tK;
-
-  const int rmd_M = gM % tM;
-  const int rmd_N = gN % tN;
-  const int rmd_K = gK % tK;
-
-  using tile_shapeA_trows = CubeTileA<dtypeA, trow, tK,  tM, rmd_K>;
-  using tile_shapeA_tcols = CubeTileA<dtypeA, trow, tK, rmd_M, tK>;
-  using tile_shapeA_tcorner = CubeTileA<dtypeA, trow, tK, rmd_M, rmd_K>;
-
-  using tile_shapeB_trows = CubeTileN8<dtypeB, tK, tcol, tK, rmd_N>;
-  using tile_shapeB_tcols = CubeTileN8<dtypeB, tK, tcol, rmd_K, tN>;
-  using tile_shapeB_tcorner = CubeTileN8<dtypeB, tK, tcol, rmd_K, rmd_N>;
-
-  using tile_shapeC_trows = TileAcc<float, trow, tcol, tM, rmd_N>;
-  using tile_shapeC_tcols = TileAcc<float, trow, tcol, rmd_M, tN>;
-  using tile_shapeC_tcorner = TileAcc<float, trow, tcol, rmd_M, rmd_N>;
-
-  using tile_shape_scale_trows =
-      Tile<Location::Vec, float, 8, tcol, BLayout::RowMajor,
-           tK/128, rmd_N>;
-  using tile_shape_scale_tcols =
-      Tile<Location::Vec, float, 8, tcol, BLayout::RowMajor,
-           rmd_K/128, tN>;
-  using tile_shape_scale_tcorner =
-      Tile<Location::Vec, float, 8, tcol, BLayout::RowMajor,
-           rmd_K/128, rmd_N>;
-
-  using tile_ACCin_trows = Tile<Location::Vec, float, trow, tcol, BLayout::RowMajor, tM, rmd_N>;
-  using tile_ACCin_tcols = Tile<Location::Vec, float, trow, tcol, BLayout::RowMajor, rmd_M, tN>;
-  using tile_ACCin_tconer = Tile<Location::Vec, float, trow, tcol, BLayout::RowMajor, rmd_M, rmd_N>;
-
-  using tile_shape_dequant_trows = Tile<Location::Vec, float, trow, tcol, BLayout::RowMajor, tM, rmd_N>;
-  using tile_shape_dequant_tcols = Tile<Location::Vec, float, trow, tcol, BLayout::RowMajor, rmd_M, tN>;
-  using tile_shape_dequant_tcorner = Tile<Location::Vec, float, trow, tcol, BLayout::RowMajor, rmd_M, rmd_N>;
-  for(int i=0;i<Mb;i++){
-    for(int j=0;j<Nb;j++){
-      auto gACC = gACCIter(i, j);
-
-      tile_shapeACC tACC;
-      tile_ACCin tACCin;
-      tile_shape_dequant tAdder[2];
-      TEXPANDS(tAdder[0], 0.);
-      int k=0;
-      #pragma clang loop unroll(full)
-      for(;k<Kb;k++){
-        auto gA = gAIter(i,k);
-        auto gB = gBIter(k,j);
-        auto gS = gScaleIter(k,j);
-        tile_shapeA tA;
-        tile_shapeB tB;
-        tile_shape_scale ts;
-        tile_shape_dequant tC_dequant;
-        TLOAD(tA, gA);
-        TLOAD(tB, gB);
-        TLOAD(ts, gS); // [1, tN]
-
-        TMATMUL(tACC, tA, tB);
-        // static_assert(tile_shapeB::ValidCol % (width_factor*128) == 0); // TODO, 暂不考虑padding，假设形状是规整的, 方便处理, taccin*ts_adder=tc_dequant
-        dequant_acc_pto(tC_dequant, tACCin, ts, tAdder[k%2]);
-        tAdder[(k+1)%2] = tC_dequant;
-      }
-      k++;
-      if constexpr (rmd_K) {
-        // to do check acc shape
-        auto gA = gAIter(i, Kb);
-        auto gB = gBIter(Kb, j);
-        auto gS = gScaleIter(Kb,j);
-        tile_shapeA_trows tA;
-        tile_shapeB_tcols tB;
-        tile_shape_scale_tcols ts;
-        tile_shape_dequant tC_dequant;
-
-        TLOAD(tA, gA);
-        TLOAD(tB, gB);
-        TLOAD(ts, gS);
-
-        TMATMUL(tACC, tA, tB);
-        dequant_acc_pto(tC_dequant, tACCin, ts, tAdder[k%2]);
-        tAdder[(k+1)%2] = tC_dequant;
-      }
-      TSTORE(gACC, tAdder[(k+1)%2]);
-    }
-    // if constexpr (rmd_N) // TODO
-  }
-  if constexpr (rmd_M) {
+  for (int i = 0; i < Mb; ++i) {
     for (int j = 0; j < Nb; ++j) {
-      auto gACC = gACCIter(Mb, j);
-      tile_shapeC_tcols tACC;
-      tile_ACCin_tcols tACCin;
-      tile_shape_dequant_tcols tAdder[2];
-      TEXPANDS(tAdder[0], 0.);
-      int k = 0;
-      #pragma clang loop unroll(full)
-      for (; k < Kb; ++k) {
-        auto gA = gAIter(Mb, k);
-        auto gB = gBIter(k, j);
-        auto gS = gScaleIter(k,j);
+      ResultHalf sums[2][2];
+      TEXPANDS(sums[0][0], 0.0f);
+      TEXPANDS(sums[0][1], 0.0f);
 
-        tile_shapeA_tcols tA;
-        tile_shapeB tB;
-        tile_shape_scale ts;
-        tile_shape_dequant_tcols tC_dequant;
-        TLOAD(tA, gA);
-        TLOAD(tB, gB);
-        TLOAD(ts, gS);
-        TMATMUL(tACC, tA, tB);
-        dequant_acc_pto(tC_dequant, tACCin, ts, tAdder[k%2]);
-        tAdder[(k+1)%2] = tC_dequant;
-      }
-      k++;
-      if constexpr (rmd_K) {
-        auto gA = gAIter(Mb, Kb);
-        auto gB = gBIter(Kb, j);
-        auto gS = gScaleIter(Kb, j);
+#pragma clang loop unroll(full)
+      for (int k = 0; k < Kb; ++k) {
+        A a;
+        B b;
+        global_tensor<dtypeA, MatrixLayout<tM, tK, gK, 1>>
+            a_block(a_ptr + uint64_t(i) * tM * gK + uint64_t(k) * tK);
+        global_tensor<dtypeB, MatrixLayout<tK, tN, gN, 1>>
+            b_block(b_ptr + (uint64_t(k) * tK * gN + uint64_t(j) * tN) /
+                              width_factor);
+        TLOAD_CUBE(a, a_block);
+        TLOAD_CUBE(b, b_block);
 
-        tile_shapeA_tcorner tA;
-        tile_shapeB_tcols tB;
-        tile_shape_scale_tcols ts;
-        tile_shape_dequant tC_dequant;
-        TLOAD(tA, gA);
-        TLOAD(tB, gB);
-        TLOAD(ts, gS);
-        TMATMUL(tACC, tA, tB);
-        dequant_acc_pto(tC_dequant, tACCin, ts, tAdder[k%2]);
-        tAdder[(k+1)%2] = tC_dequant;
+        Acc partial;
+        TMATMUL(partial, a, b);
+        auto partial_halves = TPARTVIEW<AccHalf, 1, 2>(partial);
+
+        for (int half = 0; half < 2; ++half) {
+          ScaleHalf scale;
+          global_tensor<float, MatrixLayout<1, HalfN, gN, 1>> scale_block(
+              c_ptr + uint64_t(k) * gN + uint64_t(j) * tN + half * HalfN);
+          TLOAD(scale, scale_block);
+
+          auto partial_half = partial_halves[0][half];
+          ResultHalf scaled;
+          TCOLEXPANDMUL(scaled, partial_half, scale);
+          TADD(sums[(k + 1) % 2][half], scaled, sums[k % 2][half]);
+        }
       }
-      TSTORE(gACC, tAdder[(k+1)%2]);
+
+      for (int half = 0; half < 2; ++half) {
+        global_tensor<float, MatrixLayout<tM, HalfN, gN, 1>> out_block(
+            acc_ptr + uint64_t(i) * tM * gN + uint64_t(j) * tN +
+            half * HalfN);
+        TSTORE_CUBE(out_block, sums[Kb % 2][half]);
+      }
     }
-    // todo
-    // if constexpr (rmd_N) {
-    //   auto gC = gCIter(Mb, Nb);
-
-    //   tile_shapeC_tcorner tACC;
-    //   if constexpr(Kb>0){
-    //     auto gA = gAIter(Mb, 0);
-    //     auto gB = gBIter(0, Nb);
-
-    //     tile_shapeA_tcols tA;
-    //     tile_shapeB_trows tB;
-    //     TLOAD(tA, gA);
-    //     TLOAD(tB, gB);
-    //     TMATMUL(tACC, tA, tB);
-    //   }
-    //   #pragma clang loop unroll(full)
-    //   for (int k = 1; k < Kb; ++k) {
-    //     auto gA = gAIter(Mb, k);
-    //     auto gB = gBIter(k, Nb);
-
-    //     tile_shapeA_tcols tA;
-    //     tile_shapeB_trows tB;
-    //     TLOAD(tA, gA);
-    //     TLOAD(tB, gB);
-    //     TMATMUL_ACC(tACC, tA, tB);
-    //   }
-    //   if constexpr (rmd_K) {
-    //     auto gA = gAIter(Mb, Kb);
-    //     auto gB = gBIter(Kb, Nb);
-
-    //     tile_shapeA_tcorner tA;
-    //     tile_shapeB_tcorner tB;
-    //     TLOAD(tA, gA);
-    //     TLOAD(tB, gB);
-    //     if constexpr(Kb>0){
-    //       TMATMUL_ACC(tACC, tA, tB);
-    //     } else {
-    //       TMATMUL(tACC, tA, tB);
-    //     }
-    //   }
-    //   store_acc_tile(gC, tACC);
-    // }
   }
 }
 
