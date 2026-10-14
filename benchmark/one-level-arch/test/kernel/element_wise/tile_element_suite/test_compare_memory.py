@@ -500,5 +500,55 @@ class ConcatGatherF16BitsTest(unittest.TestCase):
         self.assertIn("guarded segments are not adjacent", result.stdout)
 
 
+
+class ConcatScatterReferenceTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.temporary = tempfile.TemporaryDirectory()
+        cls.root = Path(cls.temporary.name)
+        for case in ("concat_scatter_s32_original", "concat_scatter_s32_alias_probe",
+                     "concat_scatter_f16_alias_probe"):
+            subprocess.run(["python3", str(HERE / "generate_case.py"), "--case", case,
+                            "--out", str(cls.root / case)], check=True)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.temporary.cleanup()
+
+    def test_original_moves_all_tensors_not_just_tensor_zero(self) -> None:
+        data = (self.root / "concat_scatter_s32_original/output.bin").read_bytes()
+        self.assertEqual(len(data), 128000 * 4)
+        # Last output row contains row63 from tensor0 and tensor999.
+        for output_index, input_index in ((126000, 126), (127999, 127999),
+                                           (2, 128), (2000, 2)):
+            actual = struct.unpack_from("<I", data, output_index * 4)[0]
+            self.assertEqual(actual, (input_index * 104729 + 0x80003039) & MASK32)
+
+    def test_s32_alias_needs_evolving_batch_snapshots(self) -> None:
+        data = (self.root / "concat_scatter_s32_alias_probe/input.bin").read_bytes()
+        self.assertEqual(len(data), 128000 * 4)
+        # First batch must retain its source509 despite earlier writes to it.
+        # Second batch must observe source512 overwritten by source129 in batch1.
+        for destination, source in ((124516, 509), (517, 129)):
+            self.assertEqual(struct.unpack_from("<I", data, destination * 4)[0],
+                             (source * 104729 + 0x80003039) & MASK32)
+        self.assertNotEqual(struct.unpack_from("<I", data, 517 * 4)[0],
+                            (512 * 104729 + 0x80003039) & MASK32)
+
+    def test_f16_alias_preserves_full_capacity_and_batch_order(self) -> None:
+        case = self.root / "concat_scatter_f16_alias_probe"
+        data = (case / "input.bin").read_bytes()
+        self.assertEqual(len(data), 8192000 * 2)
+        for destination, source in ((504514, 509), (512509, 3),
+                                    (8191999, 8191999)):
+            self.assertEqual(struct.unpack_from("<H", data, destination * 2)[0],
+                             (source * 40503 + 0x35A7) & 0xFFFF)
+        self.assertNotEqual(struct.unpack_from("<H", data, 512509 * 2)[0],
+                            (512 * 40503 + 0x35A7) & 0xFFFF)
+        output = (case / "output.bin").read_bytes()
+        self.assertEqual(len(output), 2048000 * 2)
+        self.assertEqual(output, b"\x5a\x5a" * 2048000)
+
+
 if __name__ == "__main__":
     unittest.main()

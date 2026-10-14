@@ -2,6 +2,39 @@
 set -euo pipefail
 
 default_cases=(
+    gather_v2_f32_0_original
+    gather_v2_s32_1_original
+    gather_v2_s32_1_alias_probe
+    gather_v2_f16_2_original
+    view_copy_s32_0_original
+    view_copy_s32_0_alias_probe
+    view_copy_f16_1_original
+    view_copy_f16_2_tail
+    broadcast_inline_s32_original
+    broadcast_inline_s32_alias_probe
+    gather_f32_0_original
+    gather_f32_0_alias_probe
+    gather_f32_1_original
+    gather_f32_1_alias_probe
+    gather_f32_2_original
+    gather_f32_2_alias_probe
+    gather_f32_3_original
+    gather_f32_3_alias_probe
+    gather_f32_3_index_alias_probe
+    transpose_f16_0_original
+    transpose_f16_0_alias_probe
+    transpose_f16_1_original
+    transpose_f16_1_alias_probe
+    transpose_f16_2_original
+    transpose_f16_2_alias_probe
+    transpose_f16_3_original
+    transpose_f16_3_alias_probe
+    broadcast_f16_2d_original
+    broadcast_f16_2d_alias_probe
+    broadcast_f16_3d_original
+    broadcast_f16_3d_alias_probe
+    broadcast_f16_5d_original
+    broadcast_f16_5d_alias_probe
     histogram_tile_element
     selected_radix_tile_element
     element_expression_chain
@@ -14,6 +47,14 @@ default_cases=(
     concat_gather_s32_alias_probe
     concat_gather_f16_original
     concat_gather_f16_alias_probe
+    broadcast_fourpe
+    gather_fourpe
+    concat_gather_fourpe
+    concat_scatter_fourpe
+    concat_scatter_s32_original
+    concat_scatter_s32_alias_probe
+    concat_scatter_f16_original
+    concat_scatter_f16_alias_probe
     group_count_s32_original
     group_count_s32_strong
     elementwise_if_for
@@ -29,11 +70,13 @@ default_cases=(
 if (( $# == 0 )); then
     cases=("${default_cases[@]}")
 elif (( $# == 2 )) && [[ $1 == --case ]] && \
-     [[ $2 == indexed_gather_tile_element || $2 == histogram_tile_element || \
+     [[ $2 == gather_v2_* || $2 == view_copy_* || $2 == broadcast_inline_s32_* || $2 == gather_f32_* || $2 == transpose_f16_* || $2 == broadcast_f16_* || $2 == indexed_gather_tile_element || $2 == histogram_tile_element || \
         $2 == selected_radix_tile_element || $2 == generic_atomic_cfg_i32 || \
         $2 == elementwise_atomic_histogram || $2 == concat_gather_s32_original || \
         $2 == concat_gather_s32_alias_probe || \
         $2 == concat_gather_f16_original || $2 == concat_gather_f16_alias_probe || \
+        $2 == broadcast_fourpe || $2 == gather_fourpe || $2 == concat_gather_fourpe || $2 == concat_scatter_fourpe || $2 == concat_scatter_s32_original || $2 == concat_scatter_s32_alias_probe || \
+        $2 == concat_scatter_f16_original || $2 == concat_scatter_f16_alias_probe || \
         $2 == group_count_s32_original || $2 == group_count_s32_strong || \
         $2 == elementwise_if_for || $2 == elementwise_if_for_strong || \
         $2 == elementwise_masked_gather_scatter || \
@@ -60,8 +103,8 @@ case "$MODELS" in
     *) echo "MODELS must be gfrun or gfrun,gfsim" >&2; exit 2 ;;
 esac
 for case_name in "${cases[@]}"; do
-    if [[ ( "$case_name" == elementwise_masked_gather_scatter* ||
-            "$case_name" == concat_gather_f16_* ) &&
+    if [[ ( "$case_name" == gather_v2_* || "$case_name" == view_copy_* || "$case_name" == broadcast_inline_s32_* || "$case_name" == gather_f32_* || "$case_name" == transpose_f16_* || "$case_name" == broadcast_f16_* || "$case_name" == elementwise_masked_gather_scatter* ||
+            "$case_name" == broadcast_fourpe || "$case_name" == gather_fourpe || "$case_name" == concat_gather_fourpe || "$case_name" == concat_gather_f16_* || "$case_name" == concat_scatter_* ) &&
           "$MODELS" != gfrun ]]; then
         echo "$case_name is a functional-only case and requires MODELS=gfrun" >&2
         exit 2
@@ -128,11 +171,29 @@ fi
 
 python3 "$case_dir/test_compare_memory.py" 2>&1 \
     | tee "$artifact_dir/compare-memory-self-test.log"
+python3 "$case_dir/test_check_disassembly_scope.py" 2>&1 \
+    | tee "$artifact_dir/disassembly-scope-self-test.log"
+python3 "$case_dir/test_concat_scatter_partition.py" 2>&1 \
+    | tee "$artifact_dir/concat-scatter-partition-self-test.log"
+python3 "$bench_root/test/kernel/sort/element_atomic_topk/test_write_provenance.py" 2>&1 \
+    | tee "$artifact_dir/provenance-self-test.log"
+python3 "$case_dir/test_broadcast_golden.py" 2>&1 \
+    | tee "$artifact_dir/broadcast-golden-self-test.log"
+python3 "$case_dir/test_transpose_golden.py" 2>&1 \
+    | tee "$artifact_dir/transpose-golden-self-test.log"
+python3 "$case_dir/test_gather_golden.py" 2>&1 \
+    | tee "$artifact_dir/gather-golden-self-test.log"
+python3 "$case_dir/test_gather_v2_golden.py" 2>&1 \
+    | tee "$artifact_dir/gather-v2-golden-self-test.log"
+python3 "$case_dir/test_view_copy_golden.py" 2>&1 \
+    | tee "$artifact_dir/view-copy-golden-self-test.log"
 python3 "$script_dir/test_gfrun_dump.py" 2>&1 \
     | tee "$artifact_dir/dump-self-test.log"
 
 run_case() {
     local case_name=$1
+    local pe_count=1
+    if [[ "$case_name" == *_fourpe || "$case_name" == gather_v2_* || "$case_name" == view_copy_* ]]; then pe_count=4; fi
     local case_artifact="$artifact_dir/$case_name"
     local golden="$case_artifact/golden"
     local elf="$case_artifact/$case_name.elf"
@@ -150,7 +211,7 @@ run_case() {
         API_INCLUDE="$installed_api_include" \
         clean all 2>&1 | tee "$case_artifact/build.log"
     cp "$built_dir/$case_name.elf" "$elf"
-    if [[ "$case_name" == signed_element_expression ||
+    if [[ "$case_name" == gather_v2_* || "$case_name" == view_copy_* || "$case_name" == broadcast_inline_s32_* || "$case_name" == gather_f32_* || "$case_name" == transpose_f16_* || "$case_name" == broadcast_f16_* || "$case_name" == signed_element_expression ||
           "$case_name" == generic_predicated_cfg_i32 ||
           "$case_name" == generic_typed_tile_cfg_i32 ||
           "$case_name" == generic_atomic_cfg_i32 ||
@@ -159,6 +220,11 @@ run_case() {
           "$case_name" == concat_gather_s32_alias_probe ||
           "$case_name" == concat_gather_f16_original ||
           "$case_name" == concat_gather_f16_alias_probe ||
+          "$case_name" == broadcast_fourpe || "$case_name" == gather_fourpe || "$case_name" == concat_gather_fourpe || "$case_name" == concat_scatter_fourpe ||
+          "$case_name" == concat_scatter_s32_original ||
+          "$case_name" == concat_scatter_s32_alias_probe ||
+          "$case_name" == concat_scatter_f16_original ||
+          "$case_name" == concat_scatter_f16_alias_probe ||
           "$case_name" == group_count_s32_original ||
           "$case_name" == group_count_s32_strong ||
           "$case_name" == elementwise_if_for ||
@@ -182,7 +248,7 @@ run_case() {
         --disassembler-options=no-tile-macros "$elf" > "$disassembly"
     "$COMPILER_DIR/llvm-objdump" -t "$elf" > "$symbols"
 
-    if [[ "$case_name" == signed_element_expression ||
+    if [[ "$case_name" == gather_v2_* || "$case_name" == view_copy_* || "$case_name" == broadcast_inline_s32_* || "$case_name" == gather_f32_* || "$case_name" == transpose_f16_* || "$case_name" == broadcast_f16_* || "$case_name" == signed_element_expression ||
           "$case_name" == generic_predicated_cfg_i32 ||
           "$case_name" == generic_typed_tile_cfg_i32 ||
           "$case_name" == generic_atomic_cfg_i32 ||
@@ -191,6 +257,11 @@ run_case() {
           "$case_name" == concat_gather_s32_alias_probe ||
           "$case_name" == concat_gather_f16_original ||
           "$case_name" == concat_gather_f16_alias_probe ||
+          "$case_name" == broadcast_fourpe || "$case_name" == gather_fourpe || "$case_name" == concat_gather_fourpe || "$case_name" == concat_scatter_fourpe ||
+          "$case_name" == concat_scatter_s32_original ||
+          "$case_name" == concat_scatter_s32_alias_probe ||
+          "$case_name" == concat_scatter_f16_original ||
+          "$case_name" == concat_scatter_f16_alias_probe ||
           "$case_name" == group_count_s32_original ||
           "$case_name" == group_count_s32_strong ||
           "$case_name" == elementwise_if_for ||
@@ -224,7 +295,7 @@ run_case() {
         --golden-dir "$golden" --target-triple "$TARGET_TRIPLE" \
         --sysroot "$SYSROOT" --resource-dir "$RESOURCE_DIR" \
         --artifact-dir "$case_artifact" --dump-range "$dump_range" \
-        --models "$MODELS" --gfrun "$gfrun" --gfsim "$gfsim" --run-exit-status 125 \
+        --models "$MODELS" --pe-count "$pe_count" --gfrun "$gfrun" --gfsim "$gfsim" --run-exit-status 125 \
         > "$case_artifact/input-provenance.log" 2>&1
 
     python3 "$script_dir/gfrun_dump.py" \
@@ -284,7 +355,7 @@ run_case() {
         --golden-dir "$golden" --target-triple "$TARGET_TRIPLE" \
         --sysroot "$SYSROOT" --resource-dir "$RESOURCE_DIR" \
         --artifact-dir "$case_artifact" --dump-range "$dump_range" \
-        --models "$MODELS" --gfrun "$gfrun" --gfsim "$gfsim" --run-exit-status 0 \
+        --models "$MODELS" --pe-count "$pe_count" --gfrun "$gfrun" --gfsim "$gfsim" --run-exit-status 0 \
         --verify-inputs-from "$case_artifact/input-provenance.json" \
         > "$case_artifact/provenance.log" 2>&1
     echo "$case_name: PASS"

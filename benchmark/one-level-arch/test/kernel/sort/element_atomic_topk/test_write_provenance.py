@@ -21,7 +21,7 @@ def sample_identity() -> dict[str, object]:
     return {
         "created_utc": "before",
         "target": {"triple": "linx64v5", "resource_dir": "/resource",
-                   "selected_models": ["gfrun", "gfsim"]},
+                   "selected_models": ["gfrun", "gfsim"], "pe_count": 1},
         "compiler_version": "clang version test",
         "artifacts": {
             "elf": {"path": "/run/test.elf", "sha256": "elf"},
@@ -78,17 +78,20 @@ class InputProvenanceTest(unittest.TestCase):
                     "--artifact-dir", str(artifact), "--dump-range", "0x1000:4",
                     "--run-exit-status", "125", "--models", "gfrun",
                     "--gfrun", str(root / "gfrun")]
-            for decoy in (False, True):
-                with self.subTest(versioned_decoy=decoy):
+            for decoy, pe_count in ((False, 1), (True, 1), (True, 4)):
+                with self.subTest(versioned_decoy=decoy, pe_count=pe_count):
                     if decoy:
                         (compiler / "clang-15").write_bytes(b"different unused compiler")
-                    with mock.patch.object(sys, "argv", argv), \
+                    with mock.patch.object(sys, "argv", argv + ["--pe-count", str(pe_count)]), \
                             mock.patch.object(write_provenance, "run", return_value=str(root)), \
                             mock.patch.object(write_provenance, "git_identity", return_value={}):
                         self.assertEqual(write_provenance.main(), 0)
                     data = json.loads(output.read_text())
                     self.assertEqual(data["artifacts"]["clang"],
                                      hashlib.sha256(b"actual compiler").hexdigest())
+                    self.assertEqual(data["target"]["pe_count"], pe_count)
+                    self.assertIn(f"softcore.multiThreadNum={pe_count}",
+                                  data["commands"]["gfrun"])
 
     def test_unchanged_inputs_accept_growing_evidence_and_status(self) -> None:
         before = sample_identity()
@@ -101,6 +104,7 @@ class InputProvenanceTest(unittest.TestCase):
 
     def test_rejects_changed_elf_binary_and_source(self) -> None:
         mutations = {
+            "PE count": lambda value: value["target"].update(pe_count=4),
             "selected models": lambda value: value["target"].update(
                 selected_models=["gfrun"]
             ),

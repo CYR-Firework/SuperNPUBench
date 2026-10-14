@@ -42,6 +42,22 @@ def function_body(text: str, symbol_fragment: str) -> str:
     return "\n".join(lines[start:end])
 
 
+def function_body_exact(text: str, symbol: str) -> str:
+    lines = text.splitlines()
+    header = re.compile(r"^[0-9a-f]+ <" + re.escape(symbol) + r">:$")
+    start = next(
+        (index for index, line in enumerate(lines) if header.match(line)), None)
+    if start is None:
+        raise CheckError(f"missing function {symbol}")
+    end = len(lines)
+    for index in range(start + 1, len(lines)):
+        match = re.match(r"^[0-9a-f]+ <([^>]+)>:", lines[index])
+        if match and not match.group(1).startswith(".L"):
+            end = index
+            break
+    return "\n".join(lines[start:end])
+
+
 def ir_function_body(text: str, symbol_fragment: str) -> str:
     match = re.search(
         r"define[^\n]*" + re.escape(symbol_fragment) + r".*?^}",
@@ -51,6 +67,90 @@ def ir_function_body(text: str, symbol_fragment: str) -> str:
     if match is None:
         raise CheckError(f"missing IR function containing {symbol_fragment}")
     return match.group(0)
+
+
+def ir_function_body_exact(text: str, symbol: str) -> str:
+    lines = text.splitlines()
+    start = None
+    for index, line in enumerate(lines):
+        match = re.match(
+            r'^define\b.*@(?:"([^"]+)"|([^\s(]+))\(', line)
+        if match and (match.group(1) or match.group(2)) == symbol:
+            start = index
+            break
+    if start is None:
+        raise CheckError(f"missing IR function {symbol}")
+    end = next(
+        (index + 1 for index in range(start + 1, len(lines))
+         if lines[index] == "}"),
+        None,
+    )
+    if end is None:
+        raise CheckError(f"unterminated IR function {symbol}")
+    return "\n".join(lines[start:end])
+
+
+def matching_function_bodies(text: str, symbol_fragment: str) -> list[tuple[str, str]]:
+    names = re.findall(r"^[0-9a-f]+ <([^>]+)>:", text, re.M)
+    matches = []
+    for name in names:
+        if name.startswith(".L") or symbol_fragment not in name:
+            continue
+        matches.append((name, function_body_exact(text, name)))
+    return matches
+
+
+def native_function_pairs(text: str, ir_text: str | None,
+                          symbol_fragment: str,
+                          required_patterns: tuple[str, ...]) -> list[tuple[str, str, str]]:
+    if ir_text is None:
+        raise CheckError(f"{symbol_fragment} requires actual-source IR")
+    matches = matching_function_bodies(text, symbol_fragment)
+    if not matches:
+        raise CheckError(f"missing native {symbol_fragment} function")
+    pairs = []
+    for name, body in matches:
+        missing = [pattern for pattern in required_patterns
+                   if not re.search(pattern, body)]
+        if missing:
+            raise CheckError(
+                f"native {name} missing required operation {missing[0]}")
+        pairs.append((name, body, ir_function_body_exact(ir_text, name)))
+    return pairs
+
+
+def ir_tci_constants(ir: str) -> dict[str, int]:
+    scalar_values = {
+        result: int(value)
+        for result, value in re.findall(
+            r"^\s*(%[-.a-zA-Z0-9]+) = freeze i32 (-?[0-9]+)$", ir, re.M)
+    }
+    extensions = {
+        result: source
+        for result, source in re.findall(
+            r"^\s*(%[-.a-zA-Z0-9]+) = (?:zext|sext) i32 "
+            r"(%[-.a-zA-Z0-9]+) to i64$", ir, re.M)
+    }
+
+    def resolve(value: str) -> int | None:
+        if not value.startswith("%"):
+            return int(value)
+        seen = set()
+        while value in extensions and value not in seen:
+            seen.add(value)
+            value = extensions[value]
+        return scalar_values.get(value)
+
+    constants = {}
+    for result, value in re.findall(
+            r"^\s*(%[-.a-zA-Z0-9]+) = call <32 x i32> "
+            r"@llvm\.linx\.experimental\.ew\.tci[^\n]*"
+            r"\(i64 32, i64 1, i64 (?:17|25), i64 29, i64 "
+            r"(%[-.a-zA-Z0-9]+|-?[0-9]+), i64 0\)", ir, re.M):
+        constant = resolve(value)
+        if constant is not None:
+            constants[result] = constant
+    return constants
 
 
 def validate_generic_predicated_cfg(text: str, ir_text: str | None) -> None:
@@ -217,8 +317,8 @@ def validate_generic_typed_tile_cfg(text: str, ir_text: str | None) -> None:
     if sum(bool(re.search(r"\bBSTART\.TEPL\s+TDIV, U32\b", line))
            for line in lines) != 1:
         raise CheckError("typed CFG lost its masked signed division")
-    if sum(bool(re.search(r"\bBSTART\.TEPL\s+TXOR, U32\b", line))
-           for line in lines) < 2:
+    if sum(bool(re.search(r"\bBSTART\.TEPL\s+TXOR, [US]32\b", line))
+           for line in lines) != 2:
         raise CheckError("typed CFG lost one of its ordinary C++ XOR expressions")
     if sum("ExecMaskPresent" in line for line in lines) < 4:
         raise CheckError("typed CFG operations lost predicate execution masks")
@@ -251,6 +351,28 @@ def validate_generic_typed_tile_cfg(text: str, ir_text: str | None) -> None:
         raise CheckError("typed CFG lost generic masked CFG operations or value merges")
     if "llvm.linx.experimental.ew.tdiv" in ir:
         raise CheckError("typed CFG used a non-generic unmasked division path")
+    calls = re.findall(
+        r"^\s*(%[-.a-zA-Z0-9]+) = call <32 x i32> "
+        r"@llvm\.linx\.experimental\.ew\.tbinary\.gpr\.masked[^\n]*\("
+        r"i64 32, i64 1, i64 (17|25), i64 29, i64 ([0-9]+), "
+        r"<32 x i32> (%[-.a-zA-Z0-9]+), <32 x i32> (%[-.a-zA-Z0-9]+)"
+        r"[^)\n]*\)", ir, re.M)
+    tci_constants = ir_tci_constants(ir)
+    xor_constants = []
+    xor_sources = []
+    for _result, _dtype, op, lhs, rhs in calls:
+        if op != "7":
+            continue
+        constant_operands = [operand for operand in (lhs, rhs)
+                             if operand in tci_constants]
+        source_operands = [operand for operand in (lhs, rhs)
+                           if operand not in tci_constants]
+        if len(constant_operands) != 1 or len(source_operands) != 1:
+            raise CheckError("typed CFG XOR lost its source/constant SSA pairing")
+        xor_constants.append(tci_constants[constant_operands[0]])
+        xor_sources.append(source_operands[0])
+    if sorted(xor_constants) != [5, 85] or len(set(xor_sources)) != 2:
+        raise CheckError("typed CFG XOR lost source constants 5/85 or SSA inputs")
 
 
 def validate_expression(text: str, ir_text: str | None) -> None:
@@ -409,9 +531,9 @@ def validate_signed_expression(text: str, ir_text: str | None) -> None:
     body = function_body(text, "signed_element_expression")
     lines = instruction_lines(body)
     for mnemonic, dtype, count in (
-        ("TADD", "S32", 2), ("TADD", "U32", 2),
+        ("TADD", "S32", 1), ("TADD", "U32", 1),
         ("TMUL", "U32", 2), ("TDIV", "S32", 2),
-        ("TSUB", "U32", 1), ("TAND", "U32", 1),
+        ("TSUB", "S32", 1), ("TAND", "U32", 1),
         ("TXOR", "U32", 1), ("TSHR", "U32", 1),
     ):
         if sum(bool(re.search(rf"\bBSTART\.TEPL\s+{mnemonic}, {dtype}\b", line))
@@ -427,7 +549,7 @@ def validate_signed_expression(text: str, ir_text: str | None) -> None:
             raise CheckError(f"signed expression needs exactly {count} total {mnemonic}/S32 sites")
     if "CUBE_M32" not in body or "M322ND" not in body or "ND2M32" not in body:
         raise CheckError("signed expression lost typed M32 transport")
-    if sum("ExecMaskPresent" in line for line in lines) != 12:
+    if sum("ExecMaskPresent" in line for line in lines) != 10:
         raise CheckError("signed generic operations lost their execution masks")
     if ir_text is None:
         raise CheckError("signed expression requires LLVM IR evidence")
@@ -444,9 +566,9 @@ def validate_signed_expression(text: str, ir_text: str | None) -> None:
         r"<32 x i32> (%[-.a-zA-Z0-9]+), <32 x i32> (%[-.a-zA-Z0-9]+)"
         r"[^)\n]*\)", ir, re.M)
     expected_operations = Counter({
-        ("25", "0"): 2,
-        ("17", "0"): 2,
-        ("25", "1"): 1,
+        ("25", "0"): 1,
+        ("17", "0"): 1,
+        ("17", "1"): 1,
         ("25", "2"): 2,
         ("17", "3"): 2,
         ("25", "5"): 1,
@@ -456,9 +578,37 @@ def validate_signed_expression(text: str, ir_text: str | None) -> None:
     if Counter((dtype, op) for _, dtype, op, _, _ in calls) != expected_operations:
         raise CheckError("signed expression IR lost exact operation dtype/shape")
     operations = {result: (dtype, op, lhs, rhs) for result, dtype, op, lhs, rhs in calls}
+    tci_constants = ir_tci_constants(ir)
+
+    def split_constant(lhs: str, rhs: str, value: int) -> str | None:
+        if tci_constants.get(lhs) == value and rhs not in tci_constants:
+            return rhs
+        if tci_constants.get(rhs) == value and lhs not in tci_constants:
+            return lhs
+        return None
+
+    canonical_arithmetic = False
+    for multiply, (dtype, op, lhs, rhs) in operations.items():
+        if dtype != "25" or op != "2":
+            continue
+        if split_constant(lhs, rhs, 3) is None:
+            continue
+        for added, (add_dtype, add_op, add_lhs, add_rhs) in operations.items():
+            if (add_dtype != "25" or add_op != "0" or
+                    multiply not in (add_lhs, add_rhs)):
+                continue
+            other = add_rhs if add_lhs == multiply else add_lhs
+            if tci_constants.get(other) != 50:
+                continue
+            canonical_arithmetic |= any(
+                div_dtype == "17" and div_op == "3" and div_lhs == added
+                for div_dtype, div_op, div_lhs, _div_rhs in operations.values())
+    if not canonical_arithmetic:
+        raise CheckError("signed arithmetic lost canonical input * 3 + 50 division path")
+
     proves_remainder = False
     for _, dtype, op, lhs, rhs in calls:
-        if dtype != "25" or op != "1" or rhs not in operations:
+        if dtype != "17" or op != "1" or rhs not in operations:
             continue
         mdtype, multiply, quotient, divisor = operations[rhs]
         if mdtype != "25" or multiply != "2" or quotient not in operations:
@@ -468,6 +618,35 @@ def validate_signed_expression(text: str, ir_text: str | None) -> None:
                              dividend == lhs and qdivisor == divisor)
     if not proves_remainder:
         raise CheckError("signed % lost exact dividend - trunc_quotient * divisor dataflow")
+
+    proves_shifted_negation = False
+    for shifted, (dtype, op, lhs, rhs) in operations.items():
+        if (dtype != "25" or op != "9" or
+                lhs in tci_constants or tci_constants.get(rhs) != 2):
+            continue
+        for masked, (and_dtype, and_op, and_lhs, and_rhs) in operations.items():
+            if (and_dtype != "25" or and_op != "5" or
+                    shifted not in (and_lhs, and_rhs)):
+                continue
+            other = and_rhs if and_lhs == shifted else and_lhs
+            if tci_constants.get(other) != 255:
+                continue
+            for inverted, (xor_dtype, xor_op, xor_lhs, xor_rhs) in operations.items():
+                if (xor_dtype != "25" or xor_op != "7" or
+                        masked not in (xor_lhs, xor_rhs)):
+                    continue
+                other = xor_rhs if xor_lhs == masked else xor_lhs
+                if tci_constants.get(other) != -86:
+                    continue
+                proves_shifted_negation |= any(
+                    add_dtype == "17" and add_op == "0" and
+                    inverted in (add_lhs, add_rhs) and
+                    tci_constants.get(
+                        add_rhs if add_lhs == inverted else add_lhs) == 1
+                    for add_dtype, add_op, add_lhs, add_rhs
+                    in operations.values())
+    if not proves_shifted_negation:
+        raise CheckError("signed bit expression lost ((x >> 2) & 255) ^ 85 negation")
 
 
 def validate_indexed_gather(text: str, ir_text: str | None) -> None:
@@ -1098,7 +1277,214 @@ def validate_masked_gather_scatter_f32(text: str,
         raise CheckError("FP32 gathered payload needs one raw official TMOV")
 
 
+def validate_concat_scatter(text: str, case: str, ir_text: str | None) -> None:
+    candidates = re.findall(r"^[0-9a-f]+ <([^>]*concat_scatter[^>]*)>:", text, re.M)
+    bodies = [(name, function_body(text, name)) for name in candidates]
+    bodies = [(name, body) for name, body in bodies
+              if re.search(r"BSTART\.TLSU\s+TLOAD,", body) and
+                 re.search(r"BSTART\.TLSU\s+MSCATTER,", body)]
+    if len(bodies) != 1:
+        raise CheckError("concat scatter needs one native snapshot/scatter function")
+    symbol, body = bodies[0]
+    fp16 = "_f16_" in case
+    fourpe = case == "concat_scatter_fourpe"
+    dtype, lanes = ("FP16", 64) if fp16 else (("FP32", 32) if fourpe else ("S32", 32))
+    loads = list(re.finditer(rf"BSTART\.TLSU\s+TLOAD, {dtype}\b", body))
+    stores = list(re.finditer(rf"BSTART\.TLSU\s+MSCATTER, {dtype}\b", body))
+    parts = [match for match in re.finditer(
+        rf"BSTART\.TLSU\s+TMOV, {dtype}\b.*?(?=BSTART|\Z)", body, re.S)
+        if re.search(r"\bB\.SUBVIEW\b", match.group(0))]
+    if (len(loads) != 1 or len(stores) != 1 or len(parts) != 1 or
+            not loads[0].start() < parts[0].start() < stores[0].start()):
+        raise CheckError("concat scatter lost full-input snapshot before part stores")
+    load_bundle = re.search(rf"BSTART\.TLSU\s+TLOAD, {dtype}\b.*?(?=BSTART|\Z)",
+                            body, re.S).group(0)
+    capacity = "<512B>" if fourpe else ("<1KB>" if fp16 else "<2KB>")
+    if capacity not in load_bundle:
+        raise CheckError("concat scatter changed its original512 snapshot capacity")
+    if not re.search(r"BSTART\.TEPL\s+TLEA, U32\b", body):
+        raise CheckError("concat scatter lost B32 indices to B64 byte addressing")
+    store_bundle = re.search(rf"BSTART\.TLSU\s+MSCATTER, {dtype}\b.*?(?=BSTART|\Z)",
+                             body, re.S).group(0)
+    if "ExecMaskPresent" not in store_bundle or "TCVT" in body:
+        raise CheckError("concat scatter lost execution mask or raw value transport")
+    if ir_text is None:
+        raise CheckError("concat scatter requires actual-source IR")
+    ir = ir_function_body(ir_text, symbol)
+    if re.search(r"extractelement|insertelement|@llvm\.vp\.|"
+                 r"@llvm\.linx\.experimental\.element\.(region|view|scatter)", ir):
+        raise CheckError("concat scatter retains scalar or intermediate element effects")
+    payload = "half" if fp16 else ("float" if fourpe else "i32")
+    scatters = re.findall(r"call void @llvm\.linx\.experimental\.ew\.mscatter\.gpr\.masked[^\n]*", ir)
+    if len(scatters) != 1 or f"<{lanes} x {payload}>" not in scatters[0]:
+        raise CheckError("concat scatter changed its typed element payload")
+    if f"<{lanes} x i64>" not in scatters[0]:
+        raise CheckError("concat scatter lost native B64 byte offsets")
+
+
+def validate_broadcast_inline(text: str, ir_text: str | None) -> None:
+    pairs = native_function_pairs(
+        text, ir_text, "broadcast_s32_element_tile",
+        (r"BSTART\.TLSU\s+MGATHER, U32\b",
+         r"BSTART\.TLSU\s+TSTORE, S32\b"))
+    if len(pairs) != 1:
+        raise CheckError("inline broadcast needs one native broadcast function")
+    _, body, ir = pairs[0]
+    if not re.search(r"\bB\.ASSEMBLE\b", body) or "<2KB>" not in body:
+        raise CheckError("inline broadcast lost its original512-element snapshot")
+    if not re.search(r"BSTART\.TEPL\s+TLEA, U32\b", body):
+        raise CheckError("inline broadcast lost B32 address indices")
+    if re.search(r"extractelement|insertelement|@llvm\.vp\.|@llvm\.linx\.experimental\.element\.(region|view|gather)", ir):
+        raise CheckError("inline broadcast retains scalar/intermediate element effects")
+
+
+def validate_broadcast_fourpe(text: str, ir_text: str | None) -> None:
+    pairs = native_function_pairs(
+        text, ir_text, "multi_thread9broadcast",
+        (r"BSTART\.TLSU\s+TLOAD, FP32\b",
+         r"BSTART\.TLSU\s+TSTORE, FP32\b"))
+    if len(pairs) != 1:
+        raise CheckError("four-PE broadcast needs one native broadcast function")
+    _, body, ir = pairs[0]
+    if "<512B>" not in body or "<128 x i32>" not in ir:
+        raise CheckError("four-PE broadcast changed its original128-element tile")
+    load = re.search(r"BSTART\.TLSU\s+TLOAD, FP32\b.*?(?=BSTART|\Z)", body, re.S)
+    if not load or not re.search(r"C\.B\.DIMI\s+128,\s+->lb0", load[0]) or not re.search(r"C\.B\.DIMI\s+128,\s+->lb2", load[0]):
+        raise CheckError("four-PE broadcast changed its original transport geometry")
+
+
+def validate_gather_hierarchy(text: str, ir_text: str | None) -> None:
+    if ir_text is None:
+        raise CheckError("gather requires actual-source IR")
+    body = function_body(text, "_Z6gather")
+    ir = ir_function_body(ir_text, "_Z6gather")
+    for opcode in ("MGATHER", "MSCATTER"):
+        if not re.search(rf"BSTART\.TLSU\s+{opcode}, FP32\b", body):
+            raise CheckError("gather missing FP32 native " + opcode)
+    if not re.search(r"BSTART\.TEPL\s+TLEA, U32\b", body):
+        raise CheckError("gather requires B32 logical address indices")
+    if not re.search(r"\bB\.ASSEMBLE\b", body) or not re.search(r"\bB\.SUBVIEW\b", body):
+        raise CheckError("gather lost the complete public hierarchical snapshot")
+    if not re.search(r"call <32 x float> @llvm\.linx\.experimental\.ew\.mgather", ir):
+        raise CheckError("gather missing logical32 native value reads")
+    if not re.search(r"call void @llvm\.linx\.experimental\.ew\.mscatter[^\n]*<32 x float>", ir):
+        raise CheckError("gather missing native raw value writes")
+    if re.search(r"extractelement|insertelement|@llvm\.vp\.|"
+                 r"@llvm\.linx\.experimental\.element\.(region|view|gather|scatter)", ir):
+        raise CheckError("gather retains scalar or intermediate element effects")
+    if re.search(r"alloca \[(32|128) x i32\]", ir):
+        raise CheckError("gather has scalar index snapshot scratch")
+
+
+def validate_concat_gather_fourpe(text: str, ir_text: str | None) -> None:
+    pairs = native_function_pairs(
+        text, ir_text, "_Z13concat_gather",
+        (r"BSTART\.TLSU\s+MGATHER, FP32\b",
+         r"BSTART\.TLSU\s+TSTORE, FP32\b"))
+    if len(pairs) != 1:
+        raise CheckError("four-PE concat gather needs one native gather function")
+    _, body, ir = pairs[0]
+    if not re.search(r"call <32 x float> @llvm\.linx\.experimental\.ew\.mgather\.gpr\.masked", ir):
+        raise CheckError("four-PE concat gather missing FP32 native reads")
+    for pattern in (r"BSTART\.TLSU\s+MGATHER, FP32\b", r"BSTART\.TLSU\s+TSTORE, FP32\b",
+                    r"BSTART\.TEPL\s+TLEA, U32\b", r"B\.ASSEMBLE\s+1, 0,", r"B\.ASSEMBLE\s+0, 1,"):
+        if not re.search(pattern, body):
+            raise CheckError("four-PE concat gather missing native snapshot path")
+    if "<512B>" not in body or "<128 x float>" not in ir:
+        raise CheckError("four-PE concat gather changed original128 snapshot")
+    if re.search(r"extractelement|insertelement|@llvm\.vp\.|@llvm\.linx\.experimental\.element\.(region|view|gather)", ir):
+        raise CheckError("four-PE concat gather retains scalar/intermediate element effects")
+
+
+def validate_indexed_snapshot(text: str, ir_text: str | None) -> None:
+    fragment = ("transpose_f16_element_tile"
+                if "transpose_f16_element_tile" in text
+                else "broadcast_f16_element_tile")
+    pairs = native_function_pairs(
+        text, ir_text, fragment,
+        (r"BSTART\.TLSU\s+MGATHER, FP16\b",
+         r"BSTART\.TLSU\s+TMOV, FP16\b",
+         r"BSTART\.TLSU\s+TSTORE, FP16\b"))
+    ir = "\n".join(pair[2] for pair in pairs)
+    if not all(re.search(r"\bB\.ASSEMBLE\b", pair[1]) for pair in pairs):
+        raise CheckError("indexed snapshot missing closed hierarchical snapshot")
+    if not all(re.search(r"\bB\.SUBVIEW\b", pair[1]) for pair in pairs):
+        raise CheckError("indexed snapshot missing borrowed output parts")
+    if not all(re.search(r"BSTART\.TEPL\s+TLEA, U32\b", pair[1]) for pair in pairs):
+        raise CheckError("indexed snapshot requires B32 indices to B64 byte offsets")
+    for _, body, _ in pairs:
+        stores = re.findall(
+            r"BSTART\.TLSU\s+TSTORE, FP16\b.*?(?=BSTART|\Z)",
+            body, re.S)
+        if not stores or any("ExecMaskPresent" not in bundle
+                             for bundle in stores):
+            raise CheckError(
+                "indexed snapshot tail stores must retain execution masks")
+    if not all(re.search(
+            r"call <64 x half> @llvm\.linx\.experimental\.ew\.mgather", pair[2])
+            for pair in pairs):
+        raise CheckError("indexed snapshot missing native logical64 FP16 gather")
+    if re.search(r"extractelement|insertelement|@llvm\.vp\.|"
+                 r"@llvm\.linx\.experimental\.element\.(region|view|gather)", ir):
+        raise CheckError("indexed snapshot retains scalar or intermediate element effects")
+
+
+def validate_leaf_gather_scatter(text: str, case: str, ir_text: str | None) -> None:
+    fragment = ("process_view_copy_tile" if case.startswith("view_copy_")
+                else "process_gather_tile")
+    half = "_f16_" in case
+    floating = "_f32_" in case
+    read_type, write_type = (("FP16", "FP16") if half else
+                             (("FP32", "FP32") if floating else ("U32", "S32")))
+    carrier = "<64 x half>" if half else ("<32 x float>" if floating else "<32 x i32>")
+    pairs = native_function_pairs(
+        text, ir_text, fragment,
+        (rf"BSTART\.TLSU\s+MGATHER, {read_type}\b",
+         rf"BSTART\.TLSU\s+MSCATTER, {write_type}\b"))
+    for _, body, ir in pairs:
+        for opcode, dtype in (("MGATHER", read_type), ("MSCATTER", write_type)):
+            bundles = re.findall(
+                rf"BSTART\.TLSU\s+{opcode}, {dtype}\b.*?(?=BSTART|\Z)",
+                body, re.S)
+            if not bundles or any("ExecMaskPresent" not in bundle
+                                  for bundle in bundles):
+                raise CheckError(case + " missing masked native " + opcode)
+        if not re.search(r"BSTART\.TEPL\s+TLEA, U32\b", body):
+            raise CheckError(case + " requires B32 logical address indices")
+        if not re.search(r"call " + re.escape(carrier) +
+                         r" @llvm\.linx\.experimental\.ew\.mgather", ir):
+            raise CheckError(case + " lost the complete physical input Tile")
+        if not re.search(r"call void @llvm\.linx\.experimental\.ew\.mscatter[^\n]*" +
+                         re.escape(carrier), ir):
+            raise CheckError(case + " lost native scatter from the input snapshot")
+        if re.search(r"extractelement|insertelement|@llvm\.vp\.|"
+                     r"@llvm\.linx\.experimental\.element\."
+                     r"(region|view|gather|scatter)", ir):
+            raise CheckError(case + " retains scalar or intermediate element effects")
+
+
 def validate(text: str, case: str, ir_text: str | None = None) -> None:
+    if case.startswith(("view_copy_", "gather_v2_")):
+        validate_leaf_gather_scatter(text, case, ir_text)
+        return
+    if case.startswith("broadcast_inline_s32_"):
+        validate_broadcast_inline(text, ir_text)
+        return
+    if case == "broadcast_fourpe":
+        validate_broadcast_fourpe(text, ir_text)
+        return
+    if case == "gather_fourpe" or case.startswith("gather_f32_"):
+        validate_gather_hierarchy(text, ir_text)
+        return
+    if case == "concat_gather_fourpe":
+        validate_concat_gather_fourpe(text, ir_text)
+        return
+    if case.startswith(("broadcast_f16_", "transpose_f16_")):
+        validate_indexed_snapshot(text, ir_text)
+        return
+    if case.startswith("concat_scatter_"):
+        validate_concat_scatter(text, case, ir_text)
+        return
     if case in ("elementwise_masked_gather_scatter",
                 "elementwise_masked_gather_scatter_strong"):
         validate_masked_gather_scatter_f32(text, ir_text)
@@ -1247,6 +1633,69 @@ def main() -> int:
     try:
         validate(text, args.case, ir_text)
         if args.self_test:
+            if args.case.startswith(("view_copy_", "gather_v2_")):
+                read_type, write_type = (("FP16", "FP16") if "_f16_" in args.case else (("FP32", "FP32") if "_f32_" in args.case else ("U32", "S32")))
+                for opcode, dtype in (("MGATHER", read_type), ("MSCATTER", write_type)):
+                    rejected("missing " + opcode, text.replace(opcode + ", " + dtype, opcode + "_REMOVED, " + dtype), args.case, ir_text)
+                rejected("wrong index width", text.replace("TLEA, U32", "TLEA, U64"), args.case, ir_text)
+                broken = re.sub(r"(BSTART\.TLSU\s+MSCATTER, (?:FP16|FP32|S32)\b.*?)(?=BSTART|\Z)",
+                                lambda match: match[0].replace("ExecMaskPresent", "NoExecMask"), text, flags=re.S)
+                rejected("unmasked scatter", broken, args.case, ir_text)
+                print(f"{args.case}: disassembly check PASS")
+                return 0
+            if args.case.startswith("broadcast_inline_s32_"):
+                for opcode, dtype in (("MGATHER", "U32"), ("TSTORE", "S32")):
+                    rejected("missing " + opcode, text.replace(opcode + ", " + dtype, opcode + "_REMOVED, " + dtype), args.case, ir_text)
+                rejected("missing snapshot", text.replace("B.ASSEMBLE", "B.ASSEMBLE_REMOVED"), args.case, ir_text)
+                rejected("wrong index width", text.replace("TLEA, U32", "TLEA, U64"), args.case, ir_text)
+                print(f"{args.case}: disassembly check PASS")
+                return 0
+            if args.case == "broadcast_fourpe":
+                for opcode in ("TLOAD", "TSTORE"):
+                    rejected("missing " + opcode, text.replace(opcode + ", FP32", opcode + "_REMOVED, FP32"), args.case, ir_text)
+                print(f"{args.case}: disassembly check PASS")
+                return 0
+            if args.case == "gather_fourpe" or args.case.startswith("gather_f32_"):
+                for opcode in ("MGATHER", "MSCATTER"):
+                    rejected("missing " + opcode, text.replace(opcode + ", FP32", opcode + "_REMOVED, FP32"), args.case, ir_text)
+                for directive in ("B.ASSEMBLE", "B.SUBVIEW"):
+                    rejected("missing " + directive, text.replace(directive, directive + "_REMOVED"), args.case, ir_text)
+                rejected("wrong index width", text.replace("TLEA, U32", "TLEA, U64"), args.case, ir_text)
+                print(f"{args.case}: disassembly check PASS")
+                return 0
+            if args.case == "concat_gather_fourpe":
+                for opcode in ("MGATHER", "TSTORE"):
+                    rejected("missing " + opcode, text.replace(opcode + ", FP32", opcode + "_REMOVED, FP32"), args.case, ir_text)
+                rejected("missing LAST", text.replace("B.ASSEMBLE", "B.ASSEMBLE_REMOVED"), args.case, ir_text)
+                rejected("wrong index width", text.replace("TLEA, U32", "TLEA, U64"), args.case, ir_text)
+                print(f"{args.case}: disassembly check PASS")
+                return 0
+            if args.case.startswith(("broadcast_f16_", "transpose_f16_")):
+                for opcode in ("MGATHER", "TSTORE"):
+                    rejected("missing " + opcode, text.replace(opcode + ", FP16", opcode + "_REMOVED, FP16"), args.case, ir_text)
+                for directive in ("B.ASSEMBLE", "B.SUBVIEW"):
+                    rejected("missing " + directive, text.replace(directive, directive + "_REMOVED"), args.case, ir_text)
+                rejected("wrong index width", text.replace("TLEA, U32", "TLEA, U64"), args.case, ir_text)
+                rejected("unmasked tail", text.replace("ExecMaskPresent", "NoExecMask"), args.case, ir_text)
+                print(f"{args.case}: disassembly check PASS")
+                return 0
+            if args.case.startswith("concat_scatter_"):
+                dtype = "FP16" if "_f16_" in args.case else (
+                    "FP32" if args.case == "concat_scatter_fourpe" else "S32")
+                rejected("missing full input snapshot", text.replace(
+                    "TLOAD, " + dtype, "TLOAD_REMOVED, " + dtype, 1), args.case, ir_text)
+                rejected("missing borrowed snapshot", text.replace(
+                    "B.SUBVIEW", "B.SUBVIEW_REMOVED", 1), args.case, ir_text)
+                rejected("wrong index width", text.replace(
+                    "TLEA, U32", "TLEA, U64", 1), args.case, ir_text)
+                rejected("unmasked scatter", re.sub(
+                    rf"(BSTART\.TLSU\s+MSCATTER, {dtype}.*?)(?=BSTART|\Z)",
+                    lambda m: m[0].replace("ExecMaskPresent", "NoExecMask"),
+                    text, count=1, flags=re.S), args.case, ir_text)
+                rejected("numeric copy", text.replace(
+                    "TMOV, " + dtype, "TCVT, " + dtype, 1), args.case, ir_text)
+                print(f"{args.case}: disassembly check PASS")
+                return 0
             if args.case in ("elementwise_if_for", "elementwise_if_for_strong",
                              "elementwise_masked_gather_scatter",
                              "elementwise_masked_gather_scatter_strong"):
@@ -1530,6 +1979,19 @@ def main() -> int:
                 )
             if args.case == "generic_typed_tile_cfg_i32":
                 rejected(
+                    "missing native XOR",
+                    re.sub(r"TXOR, ([US]32)", r"TXOR_REMOVED, \1", text,
+                           count=1),
+                    args.case,
+                    ir_text,
+                )
+                rejected(
+                    "wrong XOR source constant",
+                    text,
+                    args.case,
+                    (ir_text or "").replace("freeze i32 85", "freeze i32 86", 1),
+                )
+                rejected(
                     "missing TMOV seed",
                     text.replace("TMOV, S32", "TMOV_REMOVED, S32", 1),
                     args.case,
@@ -1584,10 +2046,21 @@ def main() -> int:
                              text.replace(site, site + "\n" + site.replace("S32", "U32"), 1),
                              args.case, ir_text)
                 rejected("unsigned division", text.replace("TDIV, S32", "TDIV, U32", 1), args.case, ir_text)
-                rejected("direct floor TREM", text.replace("TSUB, U32", "TREM, U32", 1), args.case, ir_text)
+                rejected("missing multiply", text.replace("TMUL, U32", "TMUL_REMOVED, U32", 1), args.case, ir_text)
+                rejected("direct floor TREM", text.replace("TSUB, S32", "TREM, S32", 1), args.case, ir_text)
                 rejected("wrong shift dtype", text.replace("TSHR, U32", "TSHR, S32", 1), args.case, ir_text)
+                rejected("reversed shift operands", text, args.case,
+                         re.sub(
+                             r"(i64 25, i64 29, i64 9, <32 x i32> )"
+                             r"(%[-.a-zA-Z0-9]+)(, <32 x i32> )"
+                             r"(%[-.a-zA-Z0-9]+)",
+                             r"\1\4\3\2", ir_text or "", count=1))
+                rejected("wrong arithmetic constant", text, args.case,
+                         (ir_text or "").replace("freeze i32 50", "freeze i32 51", 1))
+                rejected("wrong mask constant", text, args.case,
+                         (ir_text or "").replace("freeze i32 255", "freeze i32 254", 1))
                 rejected("wrong remainder dataflow", text, args.case,
-                         re.sub(r"(i64 32, i64 1, i64 25, i64 29, i64 )1,",
+                         re.sub(r"(i64 32, i64 1, i64 17, i64 29, i64 )1,",
                                 r"\g<1>0,", ir_text or "", count=1))
                 print(f"{args.case}: disassembly check PASS")
                 return 0

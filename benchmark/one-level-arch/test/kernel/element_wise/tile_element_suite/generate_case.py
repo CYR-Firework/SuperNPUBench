@@ -100,12 +100,18 @@ def write_u16_array(path: Path, values: array) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--case", required=True, choices=(
+        "broadcast_inline_s32_original", "broadcast_inline_s32_alias_probe",
+        'gather_v2_f32_0_original', 'gather_v2_s32_1_original', 'gather_v2_s32_1_alias_probe', 'gather_v2_f16_2_original', 'view_copy_s32_0_original', 'view_copy_s32_0_alias_probe', 'view_copy_f16_1_original', 'view_copy_f16_2_tail', 'gather_f32_3_index_alias_probe', 'gather_f32_0_original', 'gather_f32_0_alias_probe', 'gather_f32_1_original', 'gather_f32_1_alias_probe', 'gather_f32_2_original', 'gather_f32_2_alias_probe', 'gather_f32_3_original', 'gather_f32_3_alias_probe',
+        'transpose_f16_0_original', 'transpose_f16_0_alias_probe', 'transpose_f16_1_original', 'transpose_f16_1_alias_probe', 'transpose_f16_2_original', 'transpose_f16_2_alias_probe', 'transpose_f16_3_original', 'transpose_f16_3_alias_probe',
+        'broadcast_f16_2d_original', 'broadcast_f16_2d_alias_probe', 'broadcast_f16_3d_original', 'broadcast_f16_3d_alias_probe', 'broadcast_f16_5d_original', 'broadcast_f16_5d_alias_probe',
         "histogram_tile_element", "selected_radix_tile_element",
         "element_expression_chain", "signed_element_expression", "indexed_gather_tile_element",
         "generic_predicated_cfg_i32", "generic_typed_tile_cfg_i32",
         "generic_atomic_cfg_i32", "elementwise_atomic_histogram", "concat_gather_s32_original",
         "concat_gather_s32_alias_probe", "concat_gather_f16_original",
         "concat_gather_f16_alias_probe",
+        "broadcast_fourpe", "gather_fourpe", "concat_gather_fourpe", "concat_scatter_fourpe", "concat_scatter_s32_original", "concat_scatter_s32_alias_probe",
+        "concat_scatter_f16_original", "concat_scatter_f16_alias_probe",
         "group_count_s32_original", "group_count_s32_strong",
         "elementwise_if_for", "elementwise_if_for_strong",
         "elementwise_masked_gather_scatter",
@@ -116,6 +122,273 @@ def main() -> int:
     parser.add_argument("--out", required=True, type=Path)
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
+
+    if args.case == "broadcast_fourpe":
+        edge = [0, 0x80000000, 0x7f800000, 0xff800000, 0x7fc12345, 0x7f800123, 1, 0x80000001]
+        source = [edge[i % 32] if i % 32 < 8 else 0x3f000000 + i * 8191 for i in range(128)]
+        arrays = {"input": source, "output": source * 4,
+                  "guard_before": [0x5a5a5a5a] * 896, "guard_after": [0x5a5a5a5a] * 16,
+                  "seen": [0xc04e0000 | pe for pe in range(4)]}
+        segments = []
+        for name, values in arrays.items():
+            write_u32(args.out / (name + ".bin"), values)
+            segments.append({"symbol": "broadcast_fourpe_" + name, "kind": "exact", "file": name + ".bin"})
+        (args.out / "manifest.json").write_text(json.dumps({
+            "case": args.case, "pe_count": 4, "dtype": "raw_f32_bits",
+            "input_shape": [1, 128], "output_shape": [4, 128], "tile_elements": 128,
+            "path": "existing generic leading-prefix repetition copy",
+            "segments": segments,
+            "adjacent_segments": [{"before": "broadcast_fourpe_guard_before", "before_size": 3584,
+                                   "body": "broadcast_fourpe_output", "body_size": 2048,
+                                   "after": "broadcast_fourpe_guard_after", "after_size": 64}],
+        }, indent=2) + "\n")
+        return 0
+
+    if args.case == "gather_fourpe":
+        edge = [0, 0x80000000, 0x7f800000, 0xff800000, 0x7fc12345, 0x7f800123, 1, 0x80000001]
+        source = [edge[i % 32] if i % 32 < 8 else 0x3f000000 + i * 8191 for i in range(8192)]
+        indices = [(i * 37 + 13) % 128 for i in range(128)]
+        output = [value for row in indices for value in source[row * 64:(row + 1) * 64]]
+        arrays = {"input": source, "indices": indices, "output": output,
+                  "guard_before": [0x5a5a5a5a] * 896, "guard_after": [0x5a5a5a5a] * 16,
+                  "seen": [0xc04e0000 | pe for pe in range(4)]}
+        segments = []
+        for name, values in arrays.items():
+            write_u32(args.out / (name + ".bin"), values)
+            segments.append({"symbol": "gather_fourpe_" + name, "kind": "exact", "file": name + ".bin"})
+        (args.out / "manifest.json").write_text(json.dumps({
+            "case": args.case, "pe_count": 4, "dtype": "raw_f32_bits", "index_dtype": "S32",
+            "table_shape": [128, 64], "output_shape": [128, 64], "tile_shape": [32, 64],
+            "segments": segments,
+            "adjacent_segments": [{"before": "gather_fourpe_guard_before", "before_size": 3584,
+                                   "body": "gather_fourpe_output", "body_size": 32768,
+                                   "after": "gather_fourpe_guard_after", "after_size": 64}],
+        }, indent=2) + "\n")
+        return 0
+
+    if args.case.startswith(("view_copy_", "gather_v2_")):
+        if args.case.startswith("view_copy_"):
+            from test_view_copy_golden import PROFILES, expected_symbols
+            prefix, buffers = "view_copy_", ("input", "output", "alias")
+        else:
+            from test_gather_v2_golden import PROFILES, expected_symbols
+            prefix, buffers = "gather_v2_", ("input", "index", "output", "alias")
+        profile_id = int(args.case.split("_")[3])
+        alias = args.case.endswith("alias_probe")
+        arrays = expected_symbols(profile_id, alias)
+        segments = []
+        for symbol, data in arrays.items():
+            filename = symbol + ".bin"
+            (args.out / filename).write_bytes(data)
+            segments.append({"symbol": symbol, "kind": "exact", "file": filename})
+        adjacent = []
+        for name in buffers:
+            before = prefix + name + "_guard_before"
+            after = prefix + name + "_guard_after"
+            body = prefix + name
+            adjacent.append({"before": before, "before_size": len(arrays[before]),
+                             "body": body, "body_size": len(arrays[body]),
+                             "after": after, "after_size": len(arrays[after])})
+        (args.out / "manifest.json").write_text(json.dumps({
+            "case": args.case, "pe_count": 4, "profile": PROFILES[profile_id],
+            "alias": alias, "segments": segments, "adjacent_segments": adjacent,
+        }, indent=2) + "\n")
+        return 0
+
+    if args.case.startswith("gather_f32_"):
+        profile = int(args.case.split("_")[2])
+        index_alias = args.case.endswith("index_alias_probe")
+        alias = args.case.endswith("alias_probe") and not index_alias
+        rows, selected_rows, columns, tile_rows, tile_columns = [
+            (200000, 202, 97, 128, 128), (875000, 8192, 1, 128, 128),
+            (754, 640, 17, 128, 128), (131072, 32, 256, 32, 64)][profile]
+        source = array("I", [0]) * (rows * columns + 11)
+        source[:11] = array("I", [0x5a5a5a5a]) * 11
+        indices = [rows - 1 if i % 17 == 0 else (i * 7 + 3) % 64 for i in range(selected_rows)]
+        edge = [0, 0x80000000, 0x7f800000, 0xff800000, 0x7fc12345, 0x7f800123, 1, 0x80000001]
+        for row in indices:
+            for column in range(columns):
+                index = row * columns + column
+                source[11 + index] = ((index * 13 + 5) % rows if index_alias else
+                                      (edge[index % 32] if index % 32 < 8 else (index * 104729 + 0x80003039) & 0xffffffff))
+        output = array("I", [0x5a5a5a5a]) * (selected_rows * columns + 17)
+        index_storage = array("I", [0x5a5a5a5a]) * (selected_rows * columns + 17 if index_alias else selected_rows + 11)
+        index_storage[11:11 + selected_rows] = array("I", indices)
+        for m in range(0, selected_rows, tile_rows):
+            for n in range(0, columns, tile_columns):
+                # Each original MxN iteration snapshots its indices and then
+                # all selected values before publishing any output element.
+                picked = index_storage[11 + m:11 + min(m + tile_rows, selected_rows)]
+                width = min(tile_columns, columns - n)
+                snapshot = [source[11 + row * columns + n:11 + row * columns + n + width]
+                            for row in picked]
+                destination = index_storage if index_alias else (source if alias else output)
+                for row, values in enumerate(snapshot):
+                    start = 17 + (m + row) * columns + n
+                    destination[start:start + width] = values
+        arrays = {"input": source, "indices": index_storage, "output": output}
+        for name in ("input_guard_before", "input_guard_after", "output_guard_before", "output_guard_after"):
+            arrays[name] = array("I", [0x5a5a5a5a] * 16)
+        arrays["status"] = array("I", [rows, selected_rows, columns, tile_rows, tile_columns, 11, 11, 17, (2 if index_alias else int(alias)), profile, rows * columns, 0x47415431])
+        segments = []
+        for name, values in arrays.items():
+            if values.itemsize != 4:
+                raise ValueError("requires 32-bit array elements")
+            if sys.byteorder != "little":
+                values.byteswap()
+            (args.out / (name + ".bin")).write_bytes(values.tobytes())
+            segments.append({"symbol": "gather_" + name, "kind": "exact", "file": name + ".bin"})
+        (args.out / "manifest.json").write_text(json.dumps({
+            "case": args.case, "dtype": "raw_f32_bits", "index_dtype": "U32",
+            "table_rows": rows, "output_rows": selected_rows, "columns": columns,
+            "tile_shape": [tile_rows, tile_columns], "alias": alias, "index_output_alias": index_alias,
+            "input_offset": 11, "index_offset": 11, "output_offset": 17,
+            "snapshot_scope": "indices and values per original MxN tile",
+            "adjacent_segments": [{"before": "gather_" + name + "_guard_before", "before_size": 64,
+                                   "body": "gather_" + name, "body_size": len(arrays[name]) * 4,
+                                   "after": "gather_" + name + "_guard_after", "after_size": 64}
+                                  for name in ("input", "output")],
+            "segments": segments,
+        }, indent=2) + "\n")
+        return 0
+
+    if args.case.startswith("transpose_f16_"):
+        import itertools
+        import math
+        profile = int(args.case.split("_")[2])
+        alias = args.case.endswith("alias_probe")
+        shape, axis0, axis1 = [((1476, 32), 0, 1), ((1, 8, 4096, 3), 2, 3),
+                               ((1, 32, 8, 32), 1, 2), ((8, 64, 4, 16, 7), 1, 3)][profile]
+        output_shape = list(shape)
+        output_shape[axis0], output_shape[axis1] = output_shape[axis1], output_shape[axis0]
+        count = math.prod(shape)
+        source = array("H", ((i * 40503 + 0x35a7) & 65535 for i in range(count)))
+        output = array("H", [0x5a5a] * count)
+        # Build the inverse permutation by visiting INPUT coordinates. Kernel
+        # instead decomposes each output index to locate its source.
+        source_for_output = [0] * count
+        for index, coordinate in enumerate(itertools.product(*(range(n) for n in shape))):
+            permuted = list(coordinate)
+            permuted[axis0], permuted[axis1] = permuted[axis1], permuted[axis0]
+            destination = 0
+            for extent, part in zip(output_shape, permuted):
+                destination = destination * extent + part
+            source_for_output[destination] = index
+        for begin in range(0, count, 512):
+            end = min(count, begin + 512)
+            snapshot = array("H", (source[source_for_output[i]] for i in range(begin, end)))
+            if alias:
+                source[begin:end] = snapshot
+            else:
+                output[begin:end] = snapshot
+        arrays = {"input": source, "output": output}
+        for name in ("input_guard_before", "input_guard_after", "output_guard_before", "output_guard_after"):
+            arrays[name] = array("H", [0x5a5a] * 32)
+        segments = []
+        for name, data in arrays.items():
+            write_u16_array(args.out / (name + ".bin"), data)
+            segments.append({"symbol": "transpose_" + name, "kind": "exact", "file": name + ".bin"})
+        for name, data in (("in_shape", list(shape) + [0] * (128 - len(shape))),
+                           ("out_shape", output_shape + [0] * (128 - len(shape))),
+                           ("status", [count, 512, len(shape), axis0, axis1, int(alias), profile, 0x54525031])):
+            write_u32(args.out / (name + ".bin"), data)
+            segments.append({"symbol": "transpose_" + name, "kind": "exact", "file": name + ".bin"})
+        (args.out / "manifest.json").write_text(json.dumps({
+            "case": args.case, "dtype": "raw_f16_bits", "input_shape": shape,
+            "output_shape": output_shape, "tile_elements": 512, "alias": alias,
+            "snapshot_scope": "each original output tile before any store",
+            "adjacent_segments": [{"before": "transpose_" + name + "_guard_before", "before_size": 64,
+                                   "body": "transpose_" + name, "body_size": 2 * count,
+                                   "after": "transpose_" + name + "_guard_after", "after_size": 64}
+                                  for name in ("input", "output")],
+            "segments": segments,
+        }, indent=2) + "\n")
+        return 0
+
+    if args.case.startswith("broadcast_inline_s32_"):
+        alias = args.case.endswith("alias_probe")
+        count_in, count_out, tile = 64 * 49, 64 * 8 * 49, 512
+        source = [(i * 104729 + 0x80003039) & 0xffffffff for i in range(count_in)]
+        output = [0x5a5a5a5a] * (count_out + 17)
+        if alias:
+            output[11:11 + count_in] = source
+        for batch in range(0, count_out, tile):
+            # Independent ABA broadcast identity: repeat each49-element row8times.
+            snapshot = []
+            for i in range(batch, batch + tile):
+                index = (i // (8 * 49)) * 49 + i % 49
+                snapshot.append(output[11 + index] if alias else source[index])
+            output[17 + batch:17 + batch + tile] = snapshot
+        arrays = {"input": [0x5a5a5a5a] * 11 + source, "output": output,
+                  "output_guard_before": [0x5a5a5a5a] * 16,
+                  "output_guard_after": [0x5a5a5a5a] * 16,
+                  "status": [count_in, count_out, 11, 17, tile, 3, int(alias), 0x42524331]}
+        segments = []
+        for name, values in arrays.items():
+            write_u32(args.out / (name + ".bin"), values)
+            segments.append({"symbol": "broadcast_" + name, "kind": "exact", "file": name + ".bin"})
+        (args.out / "manifest.json").write_text(json.dumps({
+            "case": args.case, "dtype": "raw_s32_bits", "input_shape": [64, 1, 49],
+            "output_shape": [64, 8, 49], "tile_elements": tile, "alias": alias,
+            "input_offset": 11, "output_offset": 17,
+            "snapshot_scope": "each original output tile before any store",
+            "adjacent_segments": [{"before": "broadcast_output_guard_before", "before_size": 64,
+                                   "body": "broadcast_output", "body_size": 4 * (count_out + 17),
+                                   "after": "broadcast_output_guard_after", "after_size": 64}],
+            "segments": segments,
+        }, indent=2) + "\n")
+        return 0
+
+    if args.case.startswith("broadcast_f16_"):
+        rank = int(args.case.split("_")[2][0])
+        alias = args.case.endswith("alias_probe")
+        input_shape, output_shape = {
+            2: ((1042, 1), (1042, 129)),
+            3: ((1280, 1, 49), (1280, 8, 49)),
+            5: ((1, 1, 1, 65, 128), (1, 1, 7, 65, 128)),
+        }[rank]
+        # Cartesian-coordinate oracle, independent of kernel stride lowering.
+        import itertools
+        import math
+        count_in, count_out = math.prod(input_shape), math.prod(output_shape)
+        source = array("H", ((i * 40503 + 0x35a7) & 0xffff for i in range(count_in)))
+        observed_input = array("H", [0x5a5a] * 11) + source
+        output = array("H", [0x5a5a] * (count_out + 17))
+        if alias:
+            output[11:11 + count_in] = source
+        coordinates = itertools.product(*(range(n) for n in output_shape))
+        for begin in range(0, count_out, 2048):
+            gathered = array("H")
+            for coord in itertools.islice(coordinates, min(2048, count_out - begin)):
+                source_index = 0
+                for extent, index in zip(input_shape, coord):
+                    source_index = source_index * extent + (0 if extent == 1 else index)
+                gathered.append(output[11 + source_index] if alias else source[source_index])
+            output[17 + begin:17 + begin + len(gathered)] = gathered
+        arrays = {
+            "input": observed_input,
+            "output_guard_before": array("H", [0x5a5a] * 32),
+            "output": output,
+            "output_guard_after": array("H", [0x5a5a] * 32),
+        }
+        segments = []
+        for name, values in arrays.items():
+            filename = name + ".bin"
+            write_u16_array(args.out / filename, values)
+            segments.append({"symbol": "broadcast_" + name, "kind": "exact", "file": filename})
+        write_u32(args.out / "status.bin", [count_in, count_out, 11, 17, 2048, rank, int(alias), 0x42524331])
+        segments.append({"symbol": "broadcast_status", "kind": "exact", "file": "status.bin"})
+        (args.out / "manifest.json").write_text(json.dumps({
+            "case": args.case, "dtype": "raw_f16_bits", "input_shape": input_shape,
+            "output_shape": output_shape, "tile_elements": 2048,
+            "input_offset": 11, "output_offset": 17, "alias": alias,
+            "snapshot_scope": "each original output tile before any store",
+            "adjacent_segments": [{"before": "broadcast_output_guard_before", "before_size": 64,
+                                   "body": "broadcast_output", "body_size": 2 * (count_out + 17),
+                                   "after": "broadcast_output_guard_after", "after_size": 64}],
+            "segments": segments,
+        }, indent=2) + "\n")
+        return 0
 
     if args.case in ("elementwise_masked_gather_scatter",
                      "elementwise_masked_gather_scatter_strong"):
@@ -310,6 +583,120 @@ def main() -> int:
             "repeated_calls": 2 if strong else 1,
             "alias": strong,
             "segments": segments,
+        }, indent=2) + "\n")
+        return 0
+
+    if args.case in ("concat_gather_fourpe", "concat_scatter_fourpe"):
+        edge = [0, 0x80000000, 0x7F800000, 0xFF800000,
+                0x7FC12345, 0x7F800123, 1, 0x80000001]
+        source = [edge[i % 32] if i % 32 < 8 else 0x3F000000 + i * 8191
+                  for i in range(512)]
+        gather = args.case == "concat_gather_fourpe"
+        output = [0x5A5A5A5A] * (512 if gather else 1024)
+        if gather:
+            for row in range(16):
+                for tensor in range(2):
+                    output[row * 32 + tensor * 16:row * 32 + (tensor + 1) * 16] = source[tensor * 256 + row * 16:tensor * 256 + (row + 1) * 16]
+        else:
+            for row in range(32):
+                output[row * 32:row * 32 + 16] = source[row * 16:row * 16 + 16]
+        arrays = {"input": source, "output": output,
+                  "guard_before": [0x5A5A5A5A] * 512,
+                  "guard_after": [0x5A5A5A5A] * 16,
+                  "seen": [0xC04E0000 | pe for pe in range(4)]}
+        segments = []
+        for name, values in arrays.items():
+            filename = name + ".bin"
+            write_u32(args.out / filename, values)
+            segments.append({"symbol": args.case + "_" + name,
+                             "kind": "exact", "file": filename})
+        (args.out / "manifest.json").write_text(json.dumps({
+            "case": args.case, "pe_count": 4, "input_count": 512,
+            "output_count": len(output), "logical_batch": 128,
+            "input_shape": [16 if gather else 32, 16], "output_shape": [16 if gather else 32, 32],
+            "segments": segments,
+            "adjacent_segments": [{
+                "before": args.case + "_guard_before",
+                "body": args.case + "_output",
+                "after": args.case + "_guard_after",
+                "before_size": 2048, "body_size": len(output) * 4, "after_size": 64,
+            }],
+        }, indent=2) + "\n")
+        return 0
+
+    if args.case.startswith("concat_scatter_"):
+        fp16 = "_f16_" in args.case
+        alias = args.case.endswith("_alias_probe")
+        rows, columns, tensors = (256, 8, 1000) if fp16 else (64, 2, 1000)
+        input_count = 8192000 if fp16 else 128000
+        output_count = rows * columns * tensors
+        processed = 1024 if alias else output_count
+        alias_offset = 509
+        code, bits = ("H", 16) if fp16 else ("I", 32)
+        guard = 0x5A5A if fp16 else 0x5A5A5A5A
+        mask = (1 << bits) - 1
+        multiplier, bias = (40503, 0x35A7) if fp16 else (104729, 0x80003039)
+        values = array(code, ((i * multiplier + bias) & mask
+                              for i in range(input_count)))
+        output = array(code, [guard]) * output_count
+        if alias:
+            # Independent [N,rows,cols] -> [rows,N,cols] enumeration. Each
+            # original512 batch snapshots evolving memory before its stores.
+            destinations = []
+            for tensor in range(tensors):
+                for row in range(rows):
+                    destinations.extend(range((row * tensors + tensor) * columns,
+                                              (row * tensors + tensor + 1) * columns))
+                    if len(destinations) >= processed:
+                        break
+                if len(destinations) >= processed:
+                    break
+            for begin in range(0, processed, 512):
+                snapshot = values[begin:begin + 512]
+                for lane, value in enumerate(snapshot):
+                    values[alias_offset + destinations[begin + lane]] = value
+        else:
+            output = array(code)
+            for row in range(rows):
+                for tensor in range(tensors):
+                    begin = (tensor * rows + row) * columns
+                    output.extend(values[begin:begin + columns])
+        segments = []
+        for name, data in (("input", values), ("output", output),
+                           ("output_guard_before", array(code, [guard]) * (64 // (bits // 8))),
+                           ("output_guard_after", array(code, [guard]) * (64 // (bits // 8)))):
+            filename = name + ".bin"
+            if sys.byteorder != "little":
+                data = array(code, data)
+                data.byteswap()
+            (args.out / filename).write_bytes(data.tobytes())
+            segments.append({"symbol": "concat_scatter_" + name,
+                             "kind": "exact", "file": filename})
+        status = [0, input_count, output_count, processed, 512, rows, columns,
+                  tensors * columns, tensors, int(alias),
+                  alias_offset if alias else 0, 0x43534331]
+        write_u32(args.out / "status.bin", status)
+        segments.append({"symbol": "concat_scatter_status", "kind": "exact",
+                         "file": "status.bin"})
+        for name, shape in (("in_shape", [rows, columns] + [0] * 6),
+                            ("out_shape", [rows, tensors * columns] + [0] * 6)):
+            filename = name + ".bin"
+            (args.out / filename).write_bytes(struct.pack("<8Q", *shape))
+            segments.append({"symbol": "concat_scatter_" + name,
+                             "kind": "exact", "file": filename})
+        (args.out / "manifest.json").write_text(json.dumps({
+            "case": args.case, "input_count": input_count,
+            "output_count": output_count, "processed_count": processed,
+            "logical_batch": 512, "alias_offset": alias_offset if alias else None,
+            "reference": "tensor[N,rows,cols] -> tensor[rows,N,cols]; evolving512 snapshots for alias",
+            "original_processing_count": output_count,
+            "adjacent_segments": [{
+                "before": "concat_scatter_output_guard_before",
+                "body": "concat_scatter_output",
+                "after": "concat_scatter_output_guard_after",
+                "before_size": 64, "body_size": output_count * (bits // 8),
+                "after_size": 64,
+            }], "segments": segments,
         }, indent=2) + "\n")
         return 0
 

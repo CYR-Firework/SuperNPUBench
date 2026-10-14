@@ -125,9 +125,12 @@ def main() -> int:
     parser.add_argument("--gfsim", type=Path)
     parser.add_argument("--models", choices=("gfrun", "gfrun,gfsim"),
                         default="gfrun,gfsim")
+    parser.add_argument("--pe-count", type=int, choices=(1, 4), default=1)
     parser.add_argument("--verify-inputs-from", type=Path)
     args = parser.parse_args()
     selected_models = args.models.split(",")
+    if args.pe_count == 4 and args.models != "gfrun":
+        parser.error("four-PE functional acceptance requires --models gfrun")
     if "gfsim" in selected_models and args.gfsim is None:
         parser.error("--gfsim is required when gfsim is selected")
 
@@ -155,6 +158,7 @@ def main() -> int:
             "resource_dir": str(args.resource_dir),
             "api_include": str(args.api_include),
             "selected_models": selected_models,
+            "pe_count": args.pe_count,
             "gfrun_memory_dump": {"range": args.dump_range,
                                   "output": str(args.artifact_dir / "gfrun.mem"),
                                   "chunks": chunks},
@@ -162,7 +166,7 @@ def main() -> int:
         "commands": {
             "gfrun": [
                 str(args.gfrun),
-                "--pto059-execution-mask-dev", "-s", "softcore.multiThreadNum=1",
+                "--pto059-execution-mask-dev", "-s", f"softcore.multiThreadNum={args.pe_count}",
                 "--dump-force", "--dump-memory",
                 *dump_specs(chunks),
                 "-f", str(args.elf),
