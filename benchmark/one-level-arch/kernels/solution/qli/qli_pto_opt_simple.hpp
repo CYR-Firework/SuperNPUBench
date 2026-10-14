@@ -45,17 +45,17 @@
 //   CANN 代码位置: op_kernel/arch22/quant_lightning_indexer_v2_*.h
 //
 //   Step 1 (Q@K^T):  CANN ComputeQk (Mmad)              → QLI TMATMUL(tSacc, tQ, tK)
-//   Step 2 (ReLU):   CANN FixpSToL1 reluPre=1 (Fixpipe) → QLI TMAX(tS, tS, tZero)
-//   Step 3 (W*Sq):   CANN ProcessVec0 Mul(W, QScale)    → QLI TMUL(tWf, tWf, tSq)
-//   Step 4 (W广播):  CANN Brcb(W*QScale)                → QLI TCOLEXPANDMUL(tS, tS, tWf)
+//   Step 2 (ReLU):   CANN FixpSToL1 reluPre=1 (Fixpipe) → QLI element-for: score > 0 ? score : 0
+//   Step 3 (W*Sq):   CANN ProcessVec0 Mul(W, QScale)    → driver: W * scale_q
+//   Step 4 (W广播):  CANN Brcb(W*QScale)                → QLI element-for: score *= weight
 //   Step 5 (ReduceG):CANN ComputeWs Mmad([1,g]×[g,Skv]) → QLI TCOLSUM(tPartial, tRed)
-//   Step 6 (ScK):    CANN ProcessVec1 Mul(mmIn, kScale) → QLI TMUL(tPartial, tPartial, tSk)
+//   Step 6 (ScK):    CANN ProcessVec1 Mul(mmIn, kScale) → QLI element-for: sum *= scale_k
 //   Step 7 (TopK):   CANN SortAll+MergeSort+LD           → QLI qli_topk_simple (NPU tile op)
 //
 //   CANN ProcessVec0 中先计算 W *= Scale_Q（Mul(inWeights, inQScale)），再 Brcb 广播；
-//   QLI 在 Step 3 用 TMUL 融合 W *= scale_q，在 Step 4 用 TCOLEXPANDMUL 广播。
+//   调用方预广播 W*scale_q，Step 4 的普通 float 循环逐元素加权。
 //   CANN ProcessVec1 中 Mul(mmIn, kScale) 在 g-reduction 之后应用 scale_k；
-//   QLI 在 Step 6 用 TMUL 在 TCOLSUM 之后应用 scale_k。
+//   Step 6 的普通 float 循环在 TCOLSUM 之后应用 scale_k。
 //
 // 【与 FA 的区别】
 //   FA:  O = softmax(Q@K^T / √d) @ V    — online softmax, P@V 矩阵乘, 输出 [S, vD]
@@ -103,7 +103,7 @@
 using namespace pto;
 
 // -----------------------------------------------------------------------------
-// qli_pto — QLI 核心计算（Step 1-6，NPU tile op 实现）
+// qli_pto — QLI 核心计算（CUBE 矩阵乘 + element-for + 列归约）
 // -----------------------------------------------------------------------------
 //
 // 模板参数:
@@ -190,8 +190,10 @@ void qli_pto(float* scores_ptr,
             }
 
             tileSum tSum;
-            tileSum tZeroSum;
-            TEXPANDS(tZeroSum, 0.0f);
+            auto &sum = TPARTELEMENT(tSum);
+#pragma pto element for
+            for (uint32_t column = 0; column < kTk; ++column)
+                sum[column] = 0.0f;
 
             #pragma clang loop unroll(full)
             for (int gi = 0; gi < Gb; gi++) {
@@ -219,23 +221,27 @@ void qli_pto(float* scores_ptr,
                 tileS tS;
                 TLOAD(tS, gTmp);
 
-                tileS tZero;
-                TEXPANDS(tZero, 0.0f);
-                TMAX(tS, tS, tZero);
-
-                TMUL(tS, tS, tWb);
+                auto &score = TPARTELEMENT(tS);
+                const auto &weight = TPARTELEMENT(tWb);
+#pragma pto element for
+                for (uint32_t element = 0; element < kTm * kTk; ++element) {
+                    const float positive = score[element] > 0.0f ? score[element] : 0.0f;
+                    score[element] = positive * weight[element];
+                }
 
                 tileSum tPartial;
                 TCOLSUM(tPartial, tS);
 
-                if (gi == 0) {
-                    TADD(tSum, tZeroSum, tPartial);
-                } else {
-                    TADD(tSum, tSum, tPartial);
-                }
+                const auto &partial = TPARTELEMENT(tPartial);
+#pragma pto element for
+                for (uint32_t column = 0; column < kTk; ++column)
+                    sum[column] += partial[column];
             }
 
-            TMUL(tSum, tSum, tSk);
+            const auto &scale = TPARTELEMENT(tSk);
+#pragma pto element for
+            for (uint32_t column = 0; column < kTk; ++column)
+                sum[column] *= scale[column];
 
             auto gOut = gIterOut(i, j);
             TSTORE(gOut, tSum);
@@ -251,7 +257,7 @@ void qli_pto(float* scores_ptr,
 //      key = (sign) ? ~bits : (bits | 0x80000000)
 //   2. 逐字节 MSD radix（Byte3→Byte0）→ kth_value
 //   3. 提取：key > kth 全部入选，key == kth 边界并列补足
-//      每轮提取 = TROWARGMAX + 索引消零（TMUL，无标量 store）
+//      每轮提取 = TROWARGMAX + element-for 将选中元素清零
 // -----------------------------------------------------------------------------
 namespace qli_radix {
 
@@ -278,25 +284,21 @@ template <int CK, int CKV>
 inline void RadixPopN(TKey<CK, CKV>& mv, RU chunkBase, int32_t* out, int n) {
     // v0.58.4 行归约契约：TROWARGMAX 目的须物理单列 [N,1]（Col==1）；
     // 物理行数 32 维持 128B tile 尺寸下限，valid 仍为 [1,1]
-    using t1  = Tile<Location::Vec, RU, 32, 1, BLayout::RowMajor, 1, 1>;
-    using t1i = Tile<Location::Vec, int32_t, 32, 1, BLayout::RowMajor, 1, 1>;
-    using gi1 = global_tensor<RU, RowMajor<1, 1>>;
-    using gi1i = global_tensor<int32_t, RowMajor<1, 1>>;
-    TKey<CK, CKV> idxTile; TCI(idxTile, chunkBase);
-    for (int k = 0; k < n; k++) {
-        t1 best; TROWARGMAX(best, mv);
-        t1 bestg; TADDS(bestg, best, chunkBase);
-        t1i besti; TCVT(besti, bestg);
-        gi1i gout(out + k); TSTORE(gout, besti);
-        RU bv = 0; gi1 gbv(&bv); TSTORE(gbv, bestg);
-        TKey<CK, CKV> bbc; TEXPANDS(bbc, bv);
-        // v0.58.4 predicate 契约：TCMPS 结果为 packed predicate（UINT8 存储），
-        // 不可参与算术（TSUB/TMUL）。索引消零改用 TSEL 条件覆盖：
-        // mv = (idx == best) ? 0 : mv（TSEL 读 dst 旧值作假分支，需先有值）
-        TKey<CK, CKV> diff; TSUB(diff, idxTile, bbc);
-        TKey<CK, CKV> isp; TCMPS<CmpMode::EQ>(isp, diff, 0u);
-        TKey<CK, CKV> zero; TEXPANDS(zero, 0u);
-        TSEL(mv, isp, zero);
+    using Scalar = Tile<Location::Vec, RU, 32, 1, BLayout::RowMajor, 1, 1>;
+    auto &values = TPARTELEMENT(mv);
+    for (int k = 0; k < n; ++k) {
+        Scalar best;
+        TROWARGMAX(best, mv);
+        RU selected = 0;
+        global_tensor<RU, RowMajor<1, 1>> index(&selected);
+        TSTORE(index, best);
+        out[k] = static_cast<int32_t>(chunkBase + selected);
+        // 归约按原顺序提取；循环体只描述被选中元素的清零。
+#pragma pto element for
+        for (uint32_t element = 0; element < CKV; ++element) {
+            if (element == selected)
+                values[element] = 0;
+        }
     }
 }
 
@@ -309,27 +311,40 @@ inline void RadixExtract(RU* key_ptr, RU kthVal, RU chunkBase, int32_t* outBase,
     using gi1 = global_tensor<RU, RowMajor<1, 1>>;
     gk g(key_ptr);
 
-    // GT: key > kth（TCMPS 标量比较；predicate 不可直接归约/相乘）
+    // GT 候选及计数由普通标量比较物化，归约保持原 Tile 布局。
     {
         TKey<CK, CKV> key; TLOAD(key, g);
-        TKey<CK, CKV> isgt; TCMPS<CmpMode::GT>(isgt, key, kthVal);
-        // v0.58.4 predicate 契约：TSEL 物化 0/1 计数掩码与候选集
-        TKey<CK, CKV> one; TEXPANDS(one, 1u);
-        TKey<CK, CKV> sel1; TEXPANDS(sel1, 0u); TSEL(sel1, isgt, one);
-        t1 s; TROWSUM(s, sel1); RU cnt = 0; gi1 gcnt(&cnt); TSTORE(gcnt, s);
-        TKey<CK, CKV> cand; TEXPANDS(cand, 0u); TSEL(cand, isgt, key);
+        TKey<CK, CKV> sel1, cand;
+        auto &keys = TPARTELEMENT(key);
+        auto &counts = TPARTELEMENT(sel1);
+        auto &values = TPARTELEMENT(cand);
+#pragma pto element for
+        for (uint32_t element = 0; element < CKV; ++element) {
+            const bool take = keys[element] > kthVal;
+            counts[element] = take ? 1u : 0u;
+            values[element] = take ? keys[element] : 0u;
+        }
+        t1 s; TROWSUM(s, sel1);
+        RU cnt = 0; gi1 gcnt(&cnt); TSTORE(gcnt, s);
         RadixPopN<CK, CKV>(cand, chunkBase, outBase + outPos, (int)cnt);
         outPos += (int)cnt;
     }
     // EQ: key == kth（补足剩余名额）
     if (needEq > 0) {
         TKey<CK, CKV> key; TLOAD(key, g);
-        TKey<CK, CKV> iseq; TCMPS<CmpMode::EQ>(iseq, key, kthVal);
-        TKey<CK, CKV> one; TEXPANDS(one, 1u);
-        TKey<CK, CKV> sel1; TEXPANDS(sel1, 0u); TSEL(sel1, iseq, one);
-        t1 s; TROWSUM(s, sel1); RU cnt = 0; gi1 gcnt(&cnt); TSTORE(gcnt, s);
+        TKey<CK, CKV> sel1, cand;
+        auto &keys = TPARTELEMENT(key);
+        auto &counts = TPARTELEMENT(sel1);
+        auto &values = TPARTELEMENT(cand);
+#pragma pto element for
+        for (uint32_t element = 0; element < CKV; ++element) {
+            const bool take = keys[element] == kthVal;
+            counts[element] = take ? 1u : 0u;
+            values[element] = take ? keys[element] : 0u;
+        }
+        t1 s; TROWSUM(s, sel1);
+        RU cnt = 0; gi1 gcnt(&cnt); TSTORE(gcnt, s);
         int take = (int)cnt; if (take > needEq) take = needEq;
-        TKey<CK, CKV> cand; TEXPANDS(cand, 0u); TSEL(cand, iseq, key);
         RadixPopN<CK, CKV>(cand, chunkBase, outBase + outPos, take);
         outPos += take; needEq -= take;
     }

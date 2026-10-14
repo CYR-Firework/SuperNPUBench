@@ -11,9 +11,14 @@ extern unsigned char _binary_srcsq_data_start[];
 extern unsigned char _binary_srcsk_data_start[];
 }
 
-#define OUT_SCORES  0x4000802000ULL
+#ifdef QLI_INPUT_DATA
+extern "C" uint32_t qli_workspace[];
+#define OUT_SCORES reinterpret_cast<uintptr_t>(qli_workspace)
+#else
+#define OUT_SCORES 0x4000802000ULL
+#endif
 // indices 紧随 scores 之后，避免大 Sq*Skv 时与 scores 区域重叠
-#define OUT_INDICES (0x4000802000ULL + (uint64_t)Sq * Skv * 4)
+#define OUT_INDICES (OUT_SCORES + (uint64_t)Sq * Skv * 4)
 
 // 尊重 Makefile -DBatch=$(B)；未定义时默认 1
 #ifndef Batch

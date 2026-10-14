@@ -11,7 +11,12 @@ extern unsigned char _binary_srcsq_data_start[];
 extern unsigned char _binary_srcsk_data_start[];
 }
 
-#define OUT_SCORES  0x4000802000ULL
+#ifdef QLI_INPUT_DATA
+extern "C" uint32_t qli_workspace[];
+#define OUT_SCORES reinterpret_cast<uintptr_t>(qli_workspace)
+#else
+#define OUT_SCORES 0x4000802000ULL
+#endif
 // scores 行步长为 paddedSkv = ceil(Skv/2048)*2048（TopK 整块读取契约）
 #define PADDED_SKV (((Skv + 2047) / 2048) * 2048)
 #define OUT_INDICES (OUT_SCORES + (uint64_t)Sq * PADDED_SKV * 4)

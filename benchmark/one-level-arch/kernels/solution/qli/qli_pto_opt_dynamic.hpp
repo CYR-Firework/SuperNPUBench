@@ -96,7 +96,11 @@ inline void qli_pto_dynamic(float* scores_ptr, dtype* q_ptr, dtype* k_ptr,
                 auto gSkRef = gSk(0, j);
                 tileSk_t tSk; TLOAD(tSk, gSkRef);
 
-                tileSum_t tSum, tZeroSum; TEXPANDS(tZeroSum, 0.0f);
+                tileSum_t tSum;
+                auto &sum = TPARTELEMENT(tSum);
+#pragma pto element for
+                for (uint32_t column = 0; column < kTk; ++column)
+                    sum[column] = 0.0f;
                 #pragma clang loop unroll(full)
                 for (int gi = 0; gi < Gb; gi++) {
                     auto gQRef = gQ(gi, 0);
@@ -113,13 +117,23 @@ inline void qli_pto_dynamic(float* scores_ptr, dtype* q_ptr, dtype* k_ptr,
                     gmTmp_t gTmp(temp_gm);
                     TSTORE_CUBE(gTmp, tSCube);
                     tileS_t tS; TLOAD(tS, gTmp);
-                    tileS_t tZero; TEXPANDS(tZero, 0.0f); TMAX(tS, tS, tZero);
-                    TMUL(tS, tS, tWb);
+                    auto &score = TPARTELEMENT(tS);
+                    const auto &weight = TPARTELEMENT(tWb);
+#pragma pto element for
+                    for (uint32_t element = 0; element < kTm * kTk; ++element) {
+                        const float positive = score[element] > 0.0f ? score[element] : 0.0f;
+                        score[element] = positive * weight[element];
+                    }
                     tileSum_t tPartial; TCOLSUM(tPartial, tS);
-                    if (gi == 0) { TADD(tSum, tZeroSum, tPartial); }
-                    else { TADD(tSum, tSum, tPartial); }
+                    const auto &partial = TPARTELEMENT(tPartial);
+#pragma pto element for
+                    for (uint32_t column = 0; column < kTk; ++column)
+                        sum[column] += partial[column];
                 }
-                TMUL(tSum, tSum, tSk);
+                const auto &scale = TPARTELEMENT(tSk);
+#pragma pto element for
+                for (uint32_t column = 0; column < kTk; ++column)
+                    sum[column] *= scale[column];
                 auto gOutRef = gOut(0, j);
                 TSTORE(gOutRef, tSum);
             }
@@ -153,7 +167,11 @@ inline void qli_pto_dynamic(float* scores_ptr, dtype* q_ptr, dtype* k_ptr,
             auto gSkRef = gSk(0, j);
             tileSk_t tSk; TLOAD(tSk, gSkRef);
 
-            tileSum_t tSum, tZeroSum; TEXPANDS(tZeroSum, 0.0f);
+            tileSum_t tSum;
+            auto &sum = TPARTELEMENT(tSum);
+#pragma pto element for
+            for (uint32_t column = 0; column < kTk; ++column)
+                sum[column] = 0.0f;
 
             #pragma clang loop unroll(full)
             for (int gi = 0; gi < Gb; gi++) {
@@ -175,13 +193,23 @@ inline void qli_pto_dynamic(float* scores_ptr, dtype* q_ptr, dtype* k_ptr,
                 gmTmpPe_t gTmpPe(temp_gm + (uint64_t)tid * kTm * kTk);
                 TSTORE_CUBE(gTmpPe, tCGrp);
                 tileS_t tS; TLOAD(tS, gTmpPe);
-                tileS_t tZero; TEXPANDS(tZero, 0.0f); TMAX(tS, tS, tZero);
-                TMUL(tS, tS, tWb);
+                auto &score = TPARTELEMENT(tS);
+                const auto &weight = TPARTELEMENT(tWb);
+#pragma pto element for
+                for (uint32_t element = 0; element < kTm * kTk; ++element) {
+                    const float positive = score[element] > 0.0f ? score[element] : 0.0f;
+                    score[element] = positive * weight[element];
+                }
                 tileSum_t tPartial; TCOLSUM(tPartial, tS);
-                if (gi == 0) { TADD(tSum, tZeroSum, tPartial); }
-                else { TADD(tSum, tSum, tPartial); }
+                const auto &partial = TPARTELEMENT(tPartial);
+#pragma pto element for
+                for (uint32_t column = 0; column < kTk; ++column)
+                    sum[column] += partial[column];
             }
-            TMUL(tSum, tSum, tSk);
+            const auto &scale = TPARTELEMENT(tSk);
+#pragma pto element for
+            for (uint32_t column = 0; column < kTk; ++column)
+                sum[column] *= scale[column];
             auto gOutRef = gOut(0, j);
             TSTORE(gOutRef, tSum);
         }
@@ -207,24 +235,20 @@ inline void ChunkHist(RU* key_ptr, int byteId, RU* prefix, RU* hist) {
 inline void PopN(TKey& mv, RU chunkBase, int32_t* out, int n) {
     // v0.58.4 行归约契约：TROWARGMAX 目的须物理单列 [N,1]（Col==1）；
     // 物理行数 32 维持 128B tile 尺寸下限，valid 仍为 [1,1]
-    using t1  = Tile<Location::Vec, RU, 32, 1, BLayout::RowMajor, 1, 1>;
-    using t1i = Tile<Location::Vec, int32_t, 32, 1, BLayout::RowMajor, 1, 1>;
-    TKey idxTile; TCI(idxTile, chunkBase);
-    for (int k = 0; k < n; k++) {
-        t1 best; TROWARGMAX(best, mv);
-        t1 bestg; TADDS(bestg, best, chunkBase);
-        t1i besti; TCVT(besti, bestg);
-        { global_tensor<int32_t, RowMajor<1, 1>> gout(out + k); TSTORE(gout, besti); }
-        RU bv = 0; gk1 gbv(&bv); TSTORE(gbv, bestg);
-        TKey bbc; TEXPANDS(bbc, bv);
-        // v0.58.4 predicate 契约：TCMP/TCMPS 结果为 packed predicate，
-        // 不可参与算术；消零改用 TSEL 条件覆盖。
-        // 用 TSUB 求差 + TCMPS==0 判等（tile-scalar，与 simple 版一致的
-        // 已验证模式；避免 tile-tile TCMP 的额外 8KB 广播 tile）
-        TKey diff; TSUB(diff, idxTile, bbc);
-        TKey isp; TCMPS<CmpMode::EQ>(isp, diff, 0u);
-        TKey zero; TEXPANDS(zero, 0u);
-        TSEL(mv, isp, zero);
+    using Scalar = Tile<Location::Vec, RU, 32, 1, BLayout::RowMajor, 1, 1>;
+    auto &values = TPARTELEMENT(mv);
+    for (int k = 0; k < n; ++k) {
+        Scalar best;
+        TROWARGMAX(best, mv);
+        RU selected = 0;
+        gk1 index(&selected);
+        TSTORE(index, best);
+        out[k] = static_cast<int32_t>(chunkBase + selected);
+#pragma pto element for
+        for (uint32_t element = 0; element < MaxTileCol; ++element) {
+            if (element == selected)
+                values[element] = 0;
+        }
     }
 }
 
@@ -232,24 +256,37 @@ inline void Extract(RU* key_ptr, RU kthVal, RU chunkBase, int32_t* outBase, int&
     // v0.58.4 行归约契约：TROWSUM 目的须物理单列 [N,1]
     using t1 = Tile<Location::Vec, RU, 32, 1, BLayout::RowMajor, 1, 1>;
     gkRow g(key_ptr);
-    // GT: key > kth（TCMPS tile-scalar，与 simple 版一致；避免 tile-tile
-    // TCMP + kth 广播 tile 的额外 8KB 活 tile 触发后端 TMOV 尺寸错配）
+    // GT/EQ 使用整行 NORM 元素视图，保留原计数归约与顺序提取。
     { TKey key; TLOAD(key, g);
-      TKey isgt; TCMPS<CmpMode::GT>(isgt, key, kthVal);
-      TKey one; TEXPANDS(one, 1u);
-      TKey sel1; TEXPANDS(sel1, 0u); TSEL(sel1, isgt, one);
-      t1 s; TROWSUM(s, sel1); RU cnt = 0; gk1 gcnt(&cnt); TSTORE(gcnt, s);
-      TKey cand; TEXPANDS(cand, 0u); TSEL(cand, isgt, key);
+      TKey sel1, cand;
+      auto &keys = TPARTELEMENT(key);
+      auto &counts = TPARTELEMENT(sel1);
+      auto &values = TPARTELEMENT(cand);
+#pragma pto element for
+      for (uint32_t element = 0; element < MaxTileCol; ++element) {
+          const bool take = keys[element] > kthVal;
+          counts[element] = take ? 1u : 0u;
+          values[element] = take ? keys[element] : 0u;
+      }
+      t1 s; TROWSUM(s, sel1);
+      RU cnt = 0; gk1 gcnt(&cnt); TSTORE(gcnt, s);
       PopN(cand, chunkBase, outBase + outPos, (int)cnt);
       outPos += (int)cnt; }
     if (needEq > 0) {
       TKey key; TLOAD(key, g);
-      TKey iseq; TCMPS<CmpMode::EQ>(iseq, key, kthVal);
-      TKey one; TEXPANDS(one, 1u);
-      TKey sel1; TEXPANDS(sel1, 0u); TSEL(sel1, iseq, one);
-      t1 s; TROWSUM(s, sel1); RU cnt = 0; gk1 gcnt(&cnt); TSTORE(gcnt, s);
+      TKey sel1, cand;
+      auto &keys = TPARTELEMENT(key);
+      auto &counts = TPARTELEMENT(sel1);
+      auto &values = TPARTELEMENT(cand);
+#pragma pto element for
+      for (uint32_t element = 0; element < MaxTileCol; ++element) {
+          const bool take = keys[element] == kthVal;
+          counts[element] = take ? 1u : 0u;
+          values[element] = take ? keys[element] : 0u;
+      }
+      t1 s; TROWSUM(s, sel1);
+      RU cnt = 0; gk1 gcnt(&cnt); TSTORE(gcnt, s);
       int take = (int)cnt; if (take > needEq) take = needEq;
-      TKey cand; TEXPANDS(cand, 0u); TSEL(cand, iseq, key);
       PopN(cand, chunkBase, outBase + outPos, take);
       outPos += take; needEq -= take; }
 }
@@ -282,8 +319,16 @@ inline void qli_topk_radix_dynamic(float* scores_gm, int32_t* indices_gm,
         // 末 chunk 填充区清零（key=0 为最小值，不进入 TopK）
         int padStart = Skv - (NumChunks - 1) * MaxTileCol;
         if (padStart < MaxTileCol) {
-            volatile RU* pad = (volatile RU*)(krow + (NumChunks - 1) * MaxTileCol + padStart);
-            for (int p = 0; p < MaxTileCol - padStart; p++) pad[p] = 0;
+            const uint32_t first = static_cast<uint32_t>(padStart);
+            RU *last_chunk = krow + (NumChunks - 1) * MaxTileCol;
+            for (uint32_t base = first; base < MaxTileCol; base += 32) {
+#pragma pto element for
+                for (uint32_t element = 0; element < 32; ++element) {
+                    const uint32_t column = base + element;
+                    if (column < MaxTileCol)
+                        last_chunk[column] = 0;
+                }
+            }
         }
 
         // Step 2: 4 轮 MSD radix → kth_value
