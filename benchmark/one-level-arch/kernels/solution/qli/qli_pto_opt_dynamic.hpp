@@ -19,6 +19,7 @@
 // =============================================================================
 
 #include <common/pto_tileop.hpp>
+#include "qli_element.hpp"
 #include <cstdint>
 #include <type_traits>
 
@@ -207,40 +208,6 @@ inline void qli_pto_dynamic(float* scores_ptr, dtype* q_ptr, dtype* k_ptr,
     }
 }
 
-// ========== THISTOGRAMX（同标准 THISTOGRAM，放宽 Idx shape 约束）==========
-// v0.58.4 编码契约：模型 canonical 解码器从 B.DATR 的 PadValue 字段
-// (bits[28:27]) 读 selectedByte；PadValue 助记符 Zero=0/Max=1/Min=2/Null=3
-// 承载 ByteId 0..3（bits[19:18] 的 ByteId 槽被解码器忽略）。
-template <typename tile_o, typename tile_s, typename tile_idx>
-void THISTOGRAMX(tile_o& dst, tile_s& src, tile_idx& idx, int ByteId) {
-#define THISTOGRAMX_ASM(BYTE_NAME, PAD_NAME)                           \
-  asm volatile(                                                        \
-    "BSTART.TEPL 104, %D1\n"                                     \
-    "B.DATR %D2, " BYTE_NAME ", " PAD_NAME "\n"                        \
-    "B.DIM %3, 0, ->LB0\n"                                             \
-    "B.DIM %4, 0, ->LB1\n"                                             \
-    "B.DIM zero, %c5, ->LB2\n"                                         \
-    "B.IOT %6, %7, mask=1111, last, ->%0<%Z8>\n"                       \
-    ""                                                                  \
-    : "=Tr"(dst.data())                                                \
-    : "i"(type_traits<typename tile_s::DType>::TypeCode),              \
-      "i"(type_traits<typename tile_o::DType>::TypeCode),              \
-      "r"(dst.GetValidCol()),                                          \
-      "r"(src.GetValidRow()),                                          \
-      "i"(tile_o::Cols),                                               \
-      "Tr"(src.data()),                                                \
-      "Tr"(idx.data()),                                                \
-      "i"(tile_type_traits<typename tile_o::TileDType>::TilesizeCode))
-  switch (ByteId) {
-    case 0: THISTOGRAMX_ASM("Byte0", "Zero"); break;
-    case 1: THISTOGRAMX_ASM("Byte1", "Max");  break;
-    case 2: THISTOGRAMX_ASM("Byte2", "Min");  break;
-    default: THISTOGRAMX_ASM("Byte3", "Null"); break;
-  }
-#undef THISTOGRAMX_ASM
-}
-
-// ========== Step 7: 动态 shape + 多 PE TopK ==========
 namespace qli_radix_dyn {
 
 using RU = uint32_t;
@@ -249,26 +216,12 @@ using gkRow = global_tensor<RU, RowMajor<1, MaxSkv>>;
 using gk1 = global_tensor<RU, RowMajor<1, 1>>;
 
 inline void MakeKey(RU* dst, const RU* src) {
-    gkRow gs(const_cast<RU*>(src)); TKey bits; TLOAD(bits, gs);
-    TKey sign; TANDS(sign, bits, 0x80000000u);
-    TKey neg;  TNOT(neg, bits);
-    TKey pos;  TORS(pos, bits, 0x80000000u);
-    TKey s01;  TSHRS(s01, sign, 31u);
-    TKey diff; TSUB(diff, neg, pos);
-    TMUL(diff, diff, s01);
-    TKey key;  TADD(key, pos, diff);
-    gkRow gd(dst); TSTORE(gd, key);
+    qli_element::make_key<MaxTileCol>(dst, src);
 }
 
 inline void ChunkHist(RU* key_ptr, int byteId, RU* prefix, RU* hist) {
-    using tidx = Tile<Location::Vec, RU, 4, 8, BLayout::RowMajor>;
-    using gidx = global_tensor<RU, RowMajor<4, 8>>;
-    using th = Tile<Location::Vec, RU, 1, 256, BLayout::RowMajor>;
-    using gh = global_tensor<RU, RowMajor<1, 256>>;
-    gkRow g(key_ptr); TKey key; TLOAD(key, g);
-    tidx idxTile; { gidx gi(prefix); TLOAD(idxTile, gi); }
-    th hist_tile; THISTOGRAMX(hist_tile, key, idxTile, byteId);
-    gh gout(hist); TSTORE(gout, hist_tile);
+    const RU highPrefix = (prefix[0] << 24) | (prefix[8] << 16) | (prefix[16] << 8);
+    qli_element::histogram<MaxTileCol>(hist, key_ptr, static_cast<RU>(byteId), highPrefix);
 }
 
 inline void PopN(TKey& mv, RU chunkBase, int32_t* out, int n) {

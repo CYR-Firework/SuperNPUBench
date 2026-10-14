@@ -96,6 +96,7 @@
 // =============================================================================
 
 #include <common/pto_tileop.hpp>
+#include "qli_element.hpp"
 #include <cstdint>
 #include <limits>
 
@@ -266,47 +267,10 @@ void qli_pto(float* scores_ptr,
 }
 
 // -----------------------------------------------------------------------------
-// THISTOGRAMX — 自研展开版 THISTOGRAM（允许 Idx 与 src 不同 shape）
-// v0.58.4 编码契约：模型 canonical 解码器从 B.DATR 的 PadValue 字段
-// (bits[28:27]) 读取 selectedByte，bits[19:18] 的 ByteId 槽被忽略；
-// PadValue 助记符 Zero=0/Max=1/Min=2/Null=3 恰好承载 ByteId 0..3。
-// （上游 TileOP 模板仍写死 Null=3，多轮 Byte0-2 会错位 —— 与 TCOLSUM
-//  lb1 问题同类的未暴露缺陷，见 f00b928）
-// -----------------------------------------------------------------------------
-template <typename tile_o, typename tile_s, typename tile_idx>
-void THISTOGRAMX(tile_o& dst, tile_s& src, tile_idx& idx, int ByteId) {
-#define THISTOGRAMX_ASM(BYTE_NAME, PAD_NAME)                           \
-  asm volatile(                                                        \
-    "BSTART.TEPL 104, %D1\n"                                           \
-    "B.DATR %D2, " BYTE_NAME ", " PAD_NAME "\n"                        \
-    "B.DIM %3, 0, ->LB0\n"                                             \
-    "B.DIM %4, 0, ->LB1\n"                                             \
-    "B.DIM zero, %c5, ->LB2\n"                                         \
-    "B.IOT %6, %7, mask=1111, last, ->%0<%Z8>\n"                       \
-    ""                                                                 \
-    : "=Tr"(dst.data())                                                \
-    : "i"(type_traits<typename tile_s::DType>::TypeCode),              \
-      "i"(type_traits<typename tile_o::DType>::TypeCode),              \
-      "r"(dst.GetValidCol()),                                          \
-      "r"(src.GetValidRow()),                                          \
-      "i"(tile_o::Cols),                                               \
-      "Tr"(src.data()),                                                \
-      "Tr"(idx.data()),                                                \
-      "i"(tile_type_traits<typename tile_o::TileDType>::TilesizeCode))
-  switch (ByteId) {
-    case 0: THISTOGRAMX_ASM("Byte0", "Zero"); break;
-    case 1: THISTOGRAMX_ASM("Byte1", "Max");  break;
-    case 2: THISTOGRAMX_ASM("Byte2", "Min");  break;
-    default: THISTOGRAMX_ASM("Byte3", "Null"); break;
-  }
-#undef THISTOGRAMX_ASM
-}
-
-// -----------------------------------------------------------------------------
 // qli_topk_radix — 4 轮 MSD radix-select TopK（Step 7，模板函数风格）
 // -----------------------------------------------------------------------------
 // 【算法】
-//   1. float→uint32 sortable key（仅符号翻转，7 tile op）
+//   1. float→uint32 sortable key（element-for 符号翻转）
 //      key = (sign) ? ~bits : (bits | 0x80000000)
 //   2. 逐字节 MSD radix（Byte3→Byte0）→ kth_value
 //   3. 提取：key > kth 全部入选，key == kth 边界并列补足
@@ -319,35 +283,17 @@ using RU = uint32_t;
 template <int CK, int CKV = CK>
 using TKey = Tile<Location::Vec, RU, 1, CK, BLayout::RowMajor, 1, CKV>;
 
-// Step 1: float bits → sortable key（仅符号翻转，7 tile op）
+// Step 1: 用标量 element-for 表达符号翻转，保留完整 chunk 快照。
 template <int CK, int CKV>
 inline void RadixMakeKey(RU* dst, const RU* src) {
-    using gk = global_tensor<RU, RowMajor<1, CKV>>;
-    gk gs(const_cast<RU*>(src));
-    TKey<CK, CKV> bits; TLOAD(bits, gs);
-    TKey<CK, CKV> sign; TANDS(sign, bits, 0x80000000u);
-    TKey<CK, CKV> neg;  TNOT(neg, bits);
-    TKey<CK, CKV> pos;  TORS(pos, bits, 0x80000000u);
-    TKey<CK, CKV> s01;  TSHRS(s01, sign, 31u);
-    TKey<CK, CKV> diff; TSUB(diff, neg, pos);
-    TMUL(diff, diff, s01);
-    TKey<CK, CKV> key;  TADD(key, pos, diff);
-    gk gd(dst); TSTORE(gd, key);
+    qli_element::make_key<CK, CKV>(dst, src);
 }
 
-// Step 2: 单 chunk 直方图（THISTOGRAMX + Idx 前缀）
+// Step 2: 单 chunk 累积直方图：element-for 原子计数 + 标量前缀和
 template <int CK, int CKV>
 inline void RadixChunkHist(RU* key_ptr, int byteId, RU* prefix, RU* hist) {
-    using gk = global_tensor<RU, RowMajor<1, CKV>>;
-    using tidx = Tile<Location::Vec, RU, 4, 8, BLayout::RowMajor>;
-    using gidx = global_tensor<RU, RowMajor<4, 8>>;
-    using th = Tile<Location::Vec, RU, 1, 256, BLayout::RowMajor>;
-    using gh = global_tensor<RU, RowMajor<1, 256>>;
-    gk g(key_ptr);
-    TKey<CK, CKV> key; TLOAD(key, g);
-    tidx idxTile; { gidx gi(prefix); TLOAD(idxTile, gi); }
-    th hist_tile; THISTOGRAMX(hist_tile, key, idxTile, byteId);
-    gh gout(hist); TSTORE(gout, hist_tile);
+    const RU highPrefix = (prefix[0] << 24) | (prefix[8] << 16) | (prefix[16] << 8);
+    qli_element::histogram<CK, CKV>(hist, key_ptr, static_cast<RU>(byteId), highPrefix);
 }
 
 // Step 3: 从 key tile pop n 个最大元素（TROWARGMAX + 索引消零）
@@ -451,7 +397,7 @@ void qli_topk_radix(float* scores_gm, int32_t* indices_gm) {
         const RU* row = reinterpret_cast<const RU*>(scores_gm) + (uint64_t)i * Skv;
         RU* krow = key_scratch + (uint64_t)i * Skv;
 
-        // ---- Step 1: float → sortable key（每 chunk 7 tile op）----
+        // ---- Step 1: float → sortable key（每 chunk 完整快照）----
         if constexpr (NumChunks == 1) {
             RadixMakeKey<SinglePhy, Skv>(krow, row);
         } else if constexpr (TailCols != MaxTileCol) {
@@ -481,7 +427,7 @@ void qli_topk_radix(float* scores_gm, int32_t* indices_gm) {
                     pb[2*8+cc] = b1; pb[3*8+cc] = 0;
                 }
             }
-            // 直方图（每 chunk 1×THISTOGRAM）+ 差分合并
+            // 逐 chunk 原子直方图 + 差分合并
             if constexpr (NumChunks == 1) {
                 HistMergeChunk<SinglePhy, Skv>(krow, 0, MaxTileCol, r, prefix_buf, hist_scratch, per_bin);
             } else if constexpr (TailCols != MaxTileCol) {
