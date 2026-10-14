@@ -12,7 +12,11 @@
 //     base += total_elements 属于 broadcast() 作用域, 保留。
 //   - 入口名仍为 broadcast<>; 算法/指令链逐行与 broadcast_pto.hpp 一致。
 //
-// PTO 一层策略 (与 broadcast_pto.hpp 一致):
+// S32/512 profile 使用公开 ElementTile API：普通 C++ 逐元素计算坐标和地址，
+// 32 元素叶片经 TASSEMBLY 合成完整 512 元素快照后统一写回。其他 profile
+// 保留原有 TileOp 路径。
+//
+// 既有 PTO 一层策略 (与 broadcast_pto.hpp 一致):
 //   gen_offset (TCI/TEXPANDS/TREMS/TDIVS/TMULS/TADD) -> MGATHER (按元素索引取数)
 //   -> TSTORE; 全部用 Tile 级内联函数, 无 __vec__ 块。
 //
@@ -26,6 +30,8 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <type_traits>
+#include <utility>
 
 // ============================================================================
 // 维度规则：从后面对齐，前面自动补 1，维度=1 可广播
@@ -49,6 +55,83 @@
 // 注意: PTO ISA MGATHER<Coalesce::Elem> 使用元素索引 (非字节偏移),
 //       所以这里不再乘 sizeof(dtype)。
 // ----------------------------------------------------------------------------
+template <size_t IN_DIM, size_t OUT_DIM>
+void broadcast_s32_element_tile(
+    const int32_t *in_ptr,
+    int32_t *out_ptr,
+    const size_t *in_shape,
+    const size_t *out_shape,
+    uint32_t batch_begin)
+{
+    constexpr uint32_t kTileElements = 512;
+    constexpr uint32_t kLeafElements = 32;
+    constexpr uint32_t kLeafCount = kTileElements / kLeafElements;
+
+    uint32_t input_extents[IN_DIM];
+    uint32_t input_strides[IN_DIM];
+    uint32_t output_extents[OUT_DIM];
+    uint32_t output_strides[OUT_DIM];
+
+    uint32_t stride = 1;
+    for (int dimension = static_cast<int>(OUT_DIM) - 1;
+         dimension >= 0; --dimension) {
+        output_extents[dimension] =
+            static_cast<uint32_t>(out_shape[dimension]);
+        output_strides[dimension] = stride;
+        stride *= output_extents[dimension];
+    }
+
+    stride = 1;
+    for (int dimension = static_cast<int>(IN_DIM) - 1;
+         dimension >= 0; --dimension) {
+        input_extents[dimension] =
+            static_cast<uint32_t>(in_shape[dimension]);
+        input_strides[dimension] = stride;
+        stride *= input_extents[dimension];
+    }
+
+    pto::ElementTile<int32_t, kTileElements> logical_layout;
+    auto logical_parts =
+        pto::TPARTVIEW<kLeafElements>(logical_layout, kTileElements);
+    pto::TileArray<pto::ElementTile<int32_t, kLeafElements>, 1,
+                   kLeafCount>
+        leaves;
+
+    // 先完成本 Tile 的全部读取，再统一写回，保留逐 Tile 快照语义。
+    for (uint32_t part = 0; part < kLeafCount; ++part) {
+        pto::ElementTile<int32_t, kLeafElements> gathered;
+        auto &elements = pto::TPARTELEMENT(gathered);
+
+#pragma pto element for
+        for (uint32_t element = 0; element < kLeafElements; ++element) {
+            const uint32_t output_index =
+                batch_begin + logical_parts.logical_index(part, element);
+            uint32_t input_index = 0;
+
+            for (uint32_t dimension = 0; dimension < IN_DIM; ++dimension) {
+                const uint32_t output_dimension =
+                    dimension + static_cast<uint32_t>(OUT_DIM - IN_DIM);
+                const uint32_t coordinate =
+                    (output_index / output_strides[output_dimension]) %
+                    output_extents[output_dimension];
+                if (input_extents[dimension] != 1)
+                    input_index += coordinate * input_strides[dimension];
+            }
+
+            elements[element] = in_ptr[input_index];
+        }
+
+        // GM 的 i32 读取由 LLVM 以 U32 导入；TCVT 发布 S32 叶片 profile，
+        // 保留 32 位原始 payload 后再参与层级 assembly。
+        TCVT(leaves[0][part], gathered);
+    }
+
+    auto output_tile =
+        pto::TASSEMBLY<pto::ElementTile<int32_t, kTileElements>>(
+            std::move(leaves));
+    TSTORE(out_ptr + batch_begin, output_tile, kTileElements);
+}
+
 template<typename dtype, size_t MAX_DIM = 8, size_t IN_DIM, size_t OUT_DIM, size_t gIM, size_t gOM, size_t tM>
 void broadcast(
     dtype *in_ptr,
@@ -56,6 +139,43 @@ void broadcast(
     const size_t *in_shape,
     const size_t *out_shape
     ) {
+    if constexpr (std::is_same_v<dtype, int32_t> && tM == 512 &&
+                  IN_DIM > 0 && IN_DIM <= OUT_DIM && OUT_DIM <= MAX_DIM &&
+                  gIM > 0 && gIM <= UINT32_MAX && gOM > 0 &&
+                  gOM <= UINT32_MAX && gOM % tM == 0) {
+        uint32_t input_elements = 1;
+        uint32_t output_elements = 1;
+        for (uint32_t dimension = 0; dimension < OUT_DIM; ++dimension) {
+            if (out_shape[dimension] == 0 ||
+                out_shape[dimension] > UINT32_MAX ||
+                output_elements > UINT32_MAX / out_shape[dimension])
+                __builtin_trap();
+            output_elements *= static_cast<uint32_t>(out_shape[dimension]);
+        }
+        for (uint32_t dimension = 0; dimension < IN_DIM; ++dimension) {
+            const uint32_t output_dimension =
+                dimension + static_cast<uint32_t>(OUT_DIM - IN_DIM);
+            if (in_shape[dimension] == 0 ||
+                in_shape[dimension] > UINT32_MAX ||
+                input_elements > UINT32_MAX / in_shape[dimension] ||
+                (in_shape[dimension] != 1 &&
+                 in_shape[dimension] != out_shape[output_dimension]))
+                __builtin_trap();
+            input_elements *= static_cast<uint32_t>(in_shape[dimension]);
+        }
+        if (input_elements > gIM || gOM > output_elements)
+            __builtin_trap();
+
+        constexpr uint32_t kTileElements = 512;
+        constexpr uint32_t kTileCount =
+            static_cast<uint32_t>(gOM) / kTileElements;
+        for (uint32_t tile = 0; tile < kTileCount; ++tile)
+            broadcast_s32_element_tile<IN_DIM, OUT_DIM>(
+                in_ptr, out_ptr, in_shape, out_shape,
+                tile * kTileElements);
+        return;
+    }
+
     const size_t Mb = gOM / tM;
     const size_t rmd_M = gOM % tM;
 
