@@ -11,6 +11,7 @@ from compare_memory import load_symbols
 from check_disassembly import function_body
 import qli_key_fixture
 import qli_histogram_fixture
+import qli_topk_fixture
 
 OPTIONS = ('enable-all-vector-as-tilereg=true', 'linxv5-enable-HL-Inst-Opt=true',
            'linxv5-enable-dim-opt=true', 'linxv5-enable-ldst-bridge=false',
@@ -43,7 +44,7 @@ def check_native(text, kind, profiles):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--kind', choices=('key', 'histogram'), required=True)
+    parser.add_argument('--kind', choices=('key', 'histogram', 'topk'), required=True)
     for option in ('compiler-bin', 'sysroot', 'resource-dir', 'api-include', 'gfrun', 'out'):
         parser.add_argument('--' + option, type=Path, required=True)
     args = parser.parse_args()
@@ -51,7 +52,8 @@ def main():
     out.mkdir(parents=True, exist_ok=False)
     suite = Path(__file__).resolve().parent
     bench = suite.parents[3]
-    fixture = qli_key_fixture if args.kind == 'key' else qli_histogram_fixture
+    fixture = {'key': qli_key_fixture, 'histogram': qli_histogram_fixture,
+               'topk': qli_topk_fixture}[args.kind]
     cases = list(fixture.profiles())
     fixture.generate(out / 'fixture')
     tools = args.compiler_bin.resolve()
@@ -59,7 +61,11 @@ def main():
     binaries.append(args.gfrun.resolve())
     before = {str(path): sha(path) for path in binaries}
     inputs = [suite / f'qli_{args.kind}.cpp', Path(fixture.__file__),
-              bench / 'kernels/solution/qli/qli_element.hpp']
+              bench / 'kernels/solution/qli/qli_element.hpp', Path(__file__).resolve(),
+              suite / 'compare_memory.py', suite / 'check_disassembly.py']
+    if args.kind == 'topk':
+        inputs += [bench / 'kernels/solution/qli/qli_pto_opt_simple.hpp',
+                   Path(qli_histogram_fixture.__file__)]
     before.update({str(path): sha(path) for path in inputs})
     target = ['--target=linx64v5-unknown-linux-musl', '--sysroot=' + str(args.sysroot),
               '-resource-dir=' + str(args.resource_dir)]
@@ -89,7 +95,13 @@ def main():
         out / 'link.log')
     run([tools / 'llvm-objdump', '-d', '--disassembler-options=no-tile-macros',
          out / 'kernel.elf'], out / 'kernel.diss')
-    check_native((out / 'kernel.diss').read_text(), args.kind, cases)
+    disassembly = (out / 'kernel.diss').read_text()
+    if args.kind == 'topk':
+        for kind in ('key', 'histogram'):
+            check_native(disassembly, kind, [(128, 32), (128, 128), (2048, 2048)])
+        assert 'TROWSUM' in disassembly and 'TROWARGMAX' in disassembly
+    else:
+        check_native(disassembly, args.kind, cases)
     run([tools / 'llvm-objdump', '-t', out / 'kernel.elf'], out / 'symbols.txt')
     symbols = load_symbols(out / 'symbols.txt')
     expected = {p.stem: p.read_bytes() for p in (out / 'fixture/golden').glob('*.bin')}
@@ -108,9 +120,14 @@ def main():
     assert 'Suaccelss to Reach the End of Benchmark! R2 = 0' in (out / 'gfrun.log').read_text()
     memory = (out / 'memory.bin').read_bytes()
     assert len(memory) == end - start
+    storage_profiles = (json.loads((out / 'fixture/storage_profiles.json').read_text())
+                        if args.kind == 'topk' else {})
     for name, raw in expected.items():
         offset = symbols[name][0] - start
         actual = memory[offset:offset + len(raw)]
+        if name in storage_profiles:
+            qli_topk_fixture.compare_storage(actual, raw, *storage_profiles[name])
+            continue
         if actual != raw:
             first = next(i for i, (a, b) in enumerate(zip(actual, raw)) if a != b)
             raise AssertionError(f'{name}: first byte mismatch at {first}')
@@ -118,9 +135,11 @@ def main():
     report = {'kind': args.kind, 'profiles': len(cases), 'segments': len(expected),
               'bytes': sum(map(len, expected.values())), 'pass': True,
               'scope': 'diagnostic only; not frozen whole-application acceptance',
+              'comparison': ('unordered TopK indices; exact inputs/scratch/guards'
+                             if args.kind == 'topk' else 'exact bytes'),
               'input_sha256': before, 'elf_sha256': sha(out / 'kernel.elf')}
     (out / 'summary.json').write_text(json.dumps(report, indent=2) + '\n')
-    print(f'{args.kind}: {len(cases)} profiles, {len(expected)} exact segments PASS')
+    print(f'{args.kind}: {len(cases)} profiles, {len(expected)} checked segments PASS')
 
 
 if __name__ == '__main__':

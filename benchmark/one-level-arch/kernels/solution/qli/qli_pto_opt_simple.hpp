@@ -103,29 +103,6 @@
 using namespace pto;
 
 // -----------------------------------------------------------------------------
-// TCOLSUMX — 列求和（本仓 b8669ce 模板 lb1 误绑 dst.ValidRow=1，只累加 1 行；
-// 按上游 f00b928 (#101) 的正确编码：B.DIM 描述源几何，LB1=源 ValidRow）
-// -----------------------------------------------------------------------------
-template <typename tile_o, typename tile_i>
-void TCOLSUMX(tile_o& dst, tile_i& src) {
-  asm volatile(
-    "BSTART.TEPL 80, %D1\n"
-    "B.DIM zero, %c2, ->lb0\n"
-    "B.DIM zero, %c3, ->lb1\n"
-    "B.DIM zero, %c4, ->lb2\n"
-    "B.IOT %5, mask=1111, last, ->%0<%Z6>\n"
-    ""
-    : "=Tr"(dst.data())
-    : "i"(type_traits<typename tile_i::DType>::TypeCode),
-      "i"(tile_i::ValidCol),
-      "i"(tile_i::ValidRow),
-      "i"(tile_i::Cols),
-      "Tr"(src.data()),
-      "i"(tile_type_traits<typename tile_o::TileDType>::TilesizeCode)
-  );
-}
-
-// -----------------------------------------------------------------------------
 // qli_pto — QLI 核心计算（Step 1-6，NPU tile op 实现）
 // -----------------------------------------------------------------------------
 //
@@ -249,7 +226,7 @@ void qli_pto(float* scores_ptr,
                 TMUL(tS, tS, tWb);
 
                 tileSum tPartial;
-                TCOLSUMX(tPartial, tS);
+                TCOLSUM(tPartial, tS);
 
                 if (gi == 0) {
                     TADD(tSum, tZeroSum, tPartial);
