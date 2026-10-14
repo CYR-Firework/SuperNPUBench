@@ -1,4 +1,5 @@
 #!/bin/bash
+set -euo pipefail
 COMPILER_DIR="${COMPILER_DIR:-/remote/lms60/c00622284/janus/linxisa_compiler_v0.55/linx_blockisa_llvm_musl/bin}"
 DATA_OBJ_DIR="$1"
 OUTPUT_DIR="$2"
@@ -26,7 +27,11 @@ _binary_${name}_data_end:
 .equ _binary_${name}_data_size, .-_binary_${name}_data_start
 EOF
 
-    $COMPILER_DIR/clang++ -target linx64v5 -c "$asm_file" -o "$obj_file"
+    local flags=(--target="${TARGET_TRIPLE:-linx64v5}" -c)
+    if [[ -n "${RESOURCE_DIR:-}" ]]; then
+        flags+=(-resource-dir="$RESOURCE_DIR")
+    fi
+    "$COMPILER_DIR/clang++" "${flags[@]}" "$asm_file" -o "$obj_file"
 }
 
 build_one "inserted_slot"

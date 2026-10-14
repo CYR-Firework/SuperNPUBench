@@ -45,11 +45,12 @@ EXTRA_OBJ_FILES += $(OUTPUT_DATA_OBJ_DIR)/lookup_values.o
 pre_work: build_sim_data_objs
 
 build_sim_data_objs: gen_sim_data
-	@COMPILER_DIR="$(COMPILER_DIR)" $(DATA_OBJ_DIR)/build_data_obj.sh $(DATA_OBJ_DIR) $(OUTPUT_DATA_OBJ_DIR)
+	@COMPILER_DIR="$(COMPILER_DIR)" TARGET_TRIPLE="$(TARGET_TRIPLE)" \
+		RESOURCE_DIR="$(RESOURCE_DIR)" $(DATA_OBJ_DIR)/build_data_obj.sh $(DATA_OBJ_DIR) $(OUTPUT_DATA_OBJ_DIR)
 
-$(OUTPUT_DATA_OBJ_DIR)/%.o: $(DATA_OBJ_DIR)/%.s pre_work
-	@mkdir -p $(shell dirname $@)
-	$(AS) $(CC_O_ALL) $(INCLUDE) $(DEFINES) $< -o $@
+# The helper emits both assembly and objects in OUTPUT_DATA_OBJ_DIR.
+$(EXTRA_OBJ_FILES): build_sim_data_objs
+	@test -s "$@"
 
 endif
 
@@ -78,3 +79,16 @@ endif
 include ../../common/Makefile.common
 
 DEFINES += $(EXTRA_DEFINES)
+
+# Hashtable arithmetic and indexed fields are compiled from scalar pragma loops.
+ifeq ($(PLAT),linx)
+ifeq ($(TESTCASE),hashtable_lookup_simd)
+ELEMENT_TARGET_FLAGS = $(if $(TARGET_TRIPLE),--target=$(TARGET_TRIPLE)) \
+	$(if $(SYSROOT),--sysroot=$(SYSROOT)) \
+	$(if $(RESOURCE_DIR),-resource-dir=$(RESOURCE_DIR))
+INCLUDE += $(if $(API_INCLUDE),-I$(API_INCLUDE))
+CC_OPTS += $(ELEMENT_TARGET_FLAGS) -mllvm -linxv5-enable-generic-element=true \
+	-fno-vectorize -fno-slp-vectorize -Werror=unknown-pragmas
+CC_LINK += $(ELEMENT_TARGET_FLAGS) -fuse-ld=lld
+endif
+endif
