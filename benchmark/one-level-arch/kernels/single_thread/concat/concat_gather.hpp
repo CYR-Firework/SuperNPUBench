@@ -34,12 +34,13 @@ void concat_gather(
     uint32_t output_base_start = 0
 )
 {
-    if constexpr (std::is_same_v<DType, int32_t> && DATA_DIM == 2 &&
-                  CONCAT_DIM == 1 && tM == 512 && gOM % 512 == 0 &&
+    if constexpr (((std::is_same_v<DType, int32_t> && tM == 512) ||
+                   (std::is_same_v<DType, float> && tM == 128)) && DATA_DIM == 2 &&
+                  CONCAT_DIM == 1 && gOM % tM == 0 &&
                   gIM > 0 && gIM <= 1073741824) {
-        constexpr uint32_t kLogicalBatchElements = 512;
+        constexpr uint32_t kLogicalBatchElements = tM;
         constexpr uint32_t kPartElements = 32;
-        constexpr uint32_t kPartCount = 16;
+        constexpr uint32_t kPartCount = kLogicalBatchElements / kPartElements;
 
         const uint32_t in_rows = static_cast<uint32_t>(in_shape[0]);
         const uint32_t in_cols = static_cast<uint32_t>(in_shape[1]);
@@ -74,7 +75,10 @@ void concat_gather(
                     output_elements[element] = in_ptr[element_index];
                 }
 
-                TCVT(staged[0][part], gathered);
+                if constexpr (std::is_same_v<DType, float>)
+                    TMOV(staged[0][part], gathered);
+                else
+                    TCVT(staged[0][part], gathered);
             }
 
             ElementTile<DType, kLogicalBatchElements> output_tile =
