@@ -315,16 +315,28 @@ void quant_sparse_flash_mla_csa_v2_1_4pe_pto(
                 const int logical_begin = block * kTk;
                 const int remaining = logical_count - logical_begin;
                 const int valid_rows = remaining < kTk ? remaining : kTk;
-                const bool direct_contiguous = block_table == nullptr &&
-                    qsmla_use_direct_contiguous_tile(
-                        allow_direct, selected != nullptr, valid_rows, kTk);
+                // PA_BBND: an ORI window that lies inside one physical block
+                // is still physically contiguous, so it can be consumed
+                // directly from the mapped pool base (v3.1 keeps the same
+                // optimisation); otherwise every row is staged with a
+                // table-mapped address.
+                int64_t direct_base_row = -1;
+                if (block_table == nullptr) {
+                    if (qsmla_use_direct_contiguous_tile(
+                            allow_direct, selected != nullptr, valid_rows, kTk)) {
+                        direct_base_row = range_begin + logical_begin;
+                    }
+                } else if (allow_direct && selected == nullptr &&
+                           block_size > 0 &&
+                           (range_begin + logical_begin) % block_size +
+                                   static_cast<int>(valid_rows) <= block_size) {
+                    direct_base_row = qsmla_pa_physical_row(
+                        block_table, max_blocks, block_size, work.batch,
+                        range_begin + logical_begin);
+                }
                 kvdtype* tile_ptr = kv_tile_buf;
-                if (direct_contiguous) {
-                    // A full contiguous ORI/HCA tile can be consumed from GM
-                    // directly. Indexed tiles and the non-integral tail keep
-                    // using the bounded gather buffer to avoid over-reading.
-                    tile_ptr = source +
-                        (range_begin + logical_begin) * Config::D;
+                if (direct_base_row >= 0) {
+                    tile_ptr = source + direct_base_row * Config::D;
                 } else {
                     stage_source_tile(source, selected, range_begin,
                                       logical_begin, valid_rows,
@@ -437,14 +449,24 @@ void quant_sparse_flash_mla_csa_v2_1_4pe_pto(
                 const int logical_begin = block * kTk;
                 const int remaining = logical_count - logical_begin;
                 const int valid_rows = remaining < kTk ? remaining : kTk;
-                const bool direct_contiguous = block_table == nullptr &&
-                    qsmla_use_direct_contiguous_tile(
-                        allow_direct, selected != nullptr,
-                        valid_rows, kTk);
+                int64_t direct_base_row = -1;
+                if (block_table == nullptr) {
+                    if (qsmla_use_direct_contiguous_tile(
+                            allow_direct, selected != nullptr,
+                            valid_rows, kTk)) {
+                        direct_base_row = range_begin + logical_begin;
+                    }
+                } else if (allow_direct && selected == nullptr &&
+                           block_size > 0 &&
+                           (range_begin + logical_begin) % block_size +
+                                   static_cast<int>(valid_rows) <= block_size) {
+                    direct_base_row = qsmla_pa_physical_row(
+                        block_table, max_blocks, block_size, work.batch,
+                        range_begin + logical_begin);
+                }
                 kvdtype* tile_ptr = kv_tile_buf;
-                if (direct_contiguous) {
-                    tile_ptr = source +
-                        (range_begin + logical_begin) * Config::D;
+                if (direct_base_row >= 0) {
+                    tile_ptr = source + direct_base_row * Config::D;
                 } else {
                     stage_source_tile(source, selected, range_begin,
                                       logical_begin, valid_rows,
