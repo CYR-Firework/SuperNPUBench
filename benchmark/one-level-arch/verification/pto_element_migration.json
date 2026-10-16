@@ -1420,6 +1420,18 @@
     "claim_boundary": "24 validation profiles do not replace the denominator of 21 original application entries/all configurations and four wrappers. Earlier profile evidence remains unchanged."
   },
   "element_api_remaining_gaps": [
+    "CUBE_M16/A16 full matrix, borrowed accumulator range and row-broadcast element views remain outside this qualified API slice.",
+    "Remaining QSMLA source migration/configurations and complete original 21-application closure are unfinished.",
+    "This replay qualifies admitted O2 profiles; arbitrary helper/alias geometries and O0 are not qualified by these gates.",
+    "gfsim/TimingSim parity is deferred to a separate PR."
+  ],
+  "original_multi_thread_wrappers": [
+    "benchmark/one-level-arch/kernels/multi_thread/broadcast/broadcast.hpp",
+    "benchmark/one-level-arch/kernels/multi_thread/concat/concat_gather.hpp",
+    "benchmark/one-level-arch/kernels/multi_thread/concat/concat_scatter.hpp",
+    "benchmark/one-level-arch/kernels/multi_thread/gather/gather.hpp"
+  ],
+  "historical_element_api_remaining_gaps_20261013": [
     "FP32 ElementTile storage only32/128 and direct element fragment32; larger original gather snapshots require public storage/lowering support.",
     "FP16/U16 parent2048 can be partitioned into32 logical64 parts, but a single TileArray assembly admits at most16writers; no capacity increase is allowed.",
     "Whole-parent pointer TSTORE requires full count; generic native masked tail transport remains bounded to admitted part profiles.",
@@ -1427,10 +1439,62 @@
     "O0 marked regions remain explicitly rejected; old negative fixtures must be revised to reach their intended per-effect legality checks.",
     "Remaining original application configurations and all4 multithread wrappers require their own complete gfrun memory evidence."
   ],
-  "original_multi_thread_wrappers": [
-    "benchmark/one-level-arch/kernels/multi_thread/broadcast/broadcast.hpp",
-    "benchmark/one-level-arch/kernels/multi_thread/concat/concat_gather.hpp",
-    "benchmark/one-level-arch/kernels/multi_thread/concat/concat_scatter.hpp",
-    "benchmark/one-level-arch/kernels/multi_thread/gather/gather.hpp"
-  ]
+  "conflict_repair_20261016": {
+    "scope": "TopK-centered alternating Tile/element programming model and gfrun integration",
+    "pins": {
+      "benchmark": "056def293e905c287092c1b1f876733fdfa0f975",
+      "compiler": "f235b3e56a219fb0475f068e81a3d4201a66730d",
+      "model": "1c2e5cb11e756011528147171bd4ac779db0c91a",
+      "tileop_api": "ef578d8d92289d270a17c02b918cd1df9b496ba8"
+    },
+    "evidence": "/tmp/pto-pr-repair-final-latest-v5/final-evidence.json",
+    "gfrun": {
+      "pass": 64,
+      "fail": 0,
+      "timeout": 0,
+      "total": 64,
+      "four_actual_wrappers": 4,
+      "topk_boundary_profiles": 17,
+      "shared_workspace_replay": true
+    },
+    "canonical_topk": "777 elements, coherence, nine observed segments PASS",
+    "qli_profile_counts": {
+      "key": 48,
+      "histogram": 72,
+      "norm": 13,
+      "popn": 18,
+      "static_topk": 7,
+      "original_drivers": 5,
+      "dynamic_topk": 4
+    },
+    "matmul_original_numerical_profiles": 7,
+    "model_standard_regression": 310,
+    "model_full_diff_pass": 1148758,
+    "timeout_seconds": 120,
+    "known_nightly_baseline_failures": 3,
+    "whole_ci_status": {
+      "gfrun_linux": "310/310 PASS",
+      "full_run_tests": "FAIL: timing_test and gfsim lane",
+      "pr_template": "PASS",
+      "tileop_api_target_validation": "PASS",
+      "tileop_api_auto_merge": "blocked: draft PR retained"
+    },
+    "programming_model": {
+      "header_element_regions": 6,
+      "coherence_driver_element_regions": 1,
+      "barriers": false,
+      "alternation": "Tile load/view -> scalar-style element loop -> Tile store/reduction; repeated reduction/update in QLI",
+      "sequential_recurrences": [
+        "cutoff scan",
+        "compact collection",
+        "prefix recurrence"
+      ]
+    },
+    "does_not_close_all_original_applications": true,
+    "remaining": [
+      "CUBE_M16/A16 full element migration",
+      "remaining QSMLA configurations and full original 21-application closure",
+      "timing/gfsim qualification in separate PR"
+    ]
+  }
 }

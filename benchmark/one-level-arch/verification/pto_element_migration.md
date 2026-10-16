@@ -179,3 +179,33 @@ mnemonic 和缺失头文件的旧 driver 单独登记，不隐式恢复已退休
 - [集成 issue #370](https://github.com/PTO-ISA/pto-spec/issues/370)
 
 整个目标尚未完成；上述通过结果只关闭对应的精确验证 profile。
+
+
+## 2026-10-16 冲突修复与 TopK 核心示例复核
+
+本轮以 `basic_op/topk/element_atomic_topk.hpp` 为核心示例。四个 workspace
+清零流和两轮直方图均使用 `#pragma pto element for`，位移、比较、掩码和
+原子更新写成普通标量 C++。Tile load/view、element loop、Tile store/reduction
+按正常语句顺序交替；QLI 另验证重复的 TROWARGMAX→element clear→TROWARGMAX，
+包括真实 outlined Local Tile helper。没有显式 barrier。分位扫描、紧凑收集和
+前缀递推保留顺序执行。
+
+冻结执行输入为 LLVM `f235b3e`、TileOP-API `ef578d8`、gfrun `1c2e5cb`，
+benchmark 源码 `056def2`。本轮结果：
+
+- 默认 suite 64/64、四个实际四 PE wrapper，以及 17 个 TopK 边界 profile
+  和共享 workspace 重放通过；保留原容量、dtype、布局、别名快照和 120 秒超时。
+- TopK 777 元素及 coherence 的九个完整内存观测段通过。
+- QLI key 48、histogram 72、NORM 13、PopN 18、静态 TopK 7、原始驱动 5、
+  动态 TopK 4 组通过；覆盖有效 key=0、特殊浮点编码、ties、runtime tail 和零工作量。
+- 原始七组低精度 matmul 数值配置通过。新版 API frontend IR 与原始对象对应 IR
+  在 resource 路径和独占 `!srcloc` 诊断节点之外完全一致；逐组证明后使用同一 ELF
+  在最终 gfrun 上完整复验 golden、输入、容量尾部和 guards。独立复审还确认一个
+  原始/新版未归一化 IR 对经同一 llc 生成逐字节相同对象。
+- 模型标准清单 310/310、完整差分 1,148,758/0；Linux CI 的 gfrun 也为 310/310。
+  整体 CI 仍因 timing_test 和 gfsim lane 失败；nightly 另有三个同 ELF 的既有基线失败。
+
+原始 21 个应用、配置和四个 wrapper 的分母保持不变。上述数值通过不代表完整
+CUBE_M16/A16 element 迁移或剩余 QSMLA 配置已完成，gfsim/timing 后续另行验收。
+四个 PR 已解决冲突并推送，尚未合入。机器可读结果见同目录 JSON 的
+`conflict_repair_20261016`，冻结报告位于 `/tmp/pto-pr-repair-final-latest-v5/final-evidence.json`。
