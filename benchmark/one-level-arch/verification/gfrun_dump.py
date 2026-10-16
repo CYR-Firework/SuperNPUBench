@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 import shlex
 import shutil
@@ -13,6 +14,13 @@ import time
 
 MAX_DUMP_BYTES = 16 * 1024 * 1024
 GFRUN_TIMEOUT_SECONDS = 120
+
+
+def has_success_finisher(log: str) -> bool:
+    """Accept the current marker and the spelling in frozen older gfrun builds."""
+    return any(re.fullmatch(
+        r"(?:Success|Suaccelss) to Reach the End of Benchmark! R2 = 0", line)
+        for line in log.splitlines())
 
 
 def plan_dump(dump_range: str, output: Path) -> list[dict[str, object]]:

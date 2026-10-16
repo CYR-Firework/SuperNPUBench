@@ -15,7 +15,7 @@ SUITE = Path(__file__).resolve().parents[2]/'element_wise/tile_element_suite'
 sys.path.insert(0, str(SUITE))
 from compare_memory import load_symbols
 from check_disassembly import function_body_exact, matching_function_bodies
-from run_qli_element import OPTIONS
+from run_qli_element import OPTIONS, has_success_finisher
 
 
 def sha(path):
@@ -95,11 +95,12 @@ def main():
     bench = source.parents[3]
     tools = args.compiler_bin.resolve()
     profiles = fixture.profiles()
-    if fixture.active_commands(source.parent/'compile.all') != profiles:
+    if fixture.active_commands(source.parent/'element_original_profiles.json') != profiles:
         parser.error('active original command inventory changed')
-    files = [Path(__file__).resolve(), Path(fixture.__file__), source.parent/'compile.all',
+    files = [Path(__file__).resolve(), Path(fixture.__file__), source.parent/'element_original_profiles.json',
              source/'HiF4_HiF4.cpp', source/'A16W4.cpp', bench/'test/common/_start.s',
-             SUITE/'compare_memory.py', SUITE/'check_disassembly.py', SUITE/'run_qli_element.py']
+             SUITE/'compare_memory.py', SUITE/'check_disassembly.py', SUITE/'run_qli_element.py',
+             bench/'verification/gfrun_dump.py']
     files += list((bench/'kernels').rglob('*.hpp'))
     files += list(args.api_include.rglob('*.hpp'))
     files += list((args.resource_dir/'include').rglob('*.hpp'))
@@ -169,7 +170,7 @@ def main():
                 memory_args += ['--dump-memory',f'{address:#x}:{size:#x}:{path}']
             run([args.gfrun,'--pto059-execution-mask-dev','-s','softcore.multiThreadNum=1',
                 '--dump-force',*memory_args,'-f',case/'kernel.elf'],case/'gfrun.log', timeout=120)
-            assert 'Suaccelss to Reach the End of Benchmark! R2 = 0' in (case/'gfrun.log').read_text()
+            assert has_success_finisher((case/'gfrun.log').read_text())
             memory = read_dump_windows(windows)
             assert len(memory) == end-start
             for name, raw in wants.items():

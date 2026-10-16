@@ -200,7 +200,7 @@ set -e
 if (( gfrun_status != 0 )); then
     exit "$gfrun_status"
 fi
-grep -Eq '^Suaccelss to Reach the End of Benchmark! R2 = 0$' \
+grep -Eq '^(Success|Suaccelss) to Reach the End of Benchmark! R2 = 0$' \
     "$artifact_dir/gfrun.log"
 set +e
 python3 "$case_dir/element_atomic_topk/compare_memory.py" \

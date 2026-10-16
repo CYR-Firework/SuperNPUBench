@@ -306,7 +306,7 @@ run_case() {
 
     python3 "$script_dir/gfrun_dump.py" \
         --provenance "$case_artifact/input-provenance.json"
-    grep -Eq '^Suaccelss to Reach the End of Benchmark! R2 = 0$' \
+    grep -Eq '^(Success|Suaccelss) to Reach the End of Benchmark! R2 = 0$' \
         "$case_artifact/gfrun.log"
     python3 "$case_dir/compare_memory.py" \
         --symbols "$symbols" --golden "$golden" \

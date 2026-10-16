@@ -8,7 +8,7 @@ import matmul_lowp_fixture as fixture
 
 class LowpFixtureTest(unittest.TestCase):
     def test_inventory_matches_every_original_active_command(self):
-        self.assertEqual(fixture.active_commands(Path(__file__).parents[1]/'compile.all'), fixture.profiles())
+        self.assertEqual(fixture.active_commands(Path(__file__).parents[1]/'element_original_profiles.json'), fixture.profiles())
         self.assertEqual(len(fixture.profiles()), 7)
 
     def test_packed_lane_order_and_all_codes(self):

@@ -30,7 +30,10 @@ def profiles():
 
 def active_commands(path):
     commands = []
-    for line in Path(path).read_text().splitlines():
+    path = Path(path)
+    lines = (json.loads(path.read_text())["original_commands"]
+             if path.suffix == ".json" else path.read_text().splitlines())
+    for line in lines:
         if not re.match(r'^make\s', line):
             continue
         fields = dict(re.findall(r'(\w+)=(\w+)', line))

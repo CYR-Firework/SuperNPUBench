@@ -7,10 +7,19 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from gfrun_dump import MAX_DUMP_BYTES, assemble_dump, dump_specs, plan_dump, main
+from gfrun_dump import (MAX_DUMP_BYTES, assemble_dump, dump_specs,
+                       has_success_finisher, plan_dump, main)
 
 
 class DumpPlanTest(unittest.TestCase):
+    def test_current_and_frozen_success_finishers(self):
+        for spelling in ("Success", "Suaccelss"):
+            marker = spelling + " to Reach the End of Benchmark! R2 = 0"
+            self.assertTrue(has_success_finisher("diagnostic\n" + marker + "\n"))
+            for wrong in (marker + "1", marker.replace("= 0", "= 1"),
+                          "prefix " + marker, "no finisher"):
+                self.assertFalse(has_success_finisher(wrong))
+
     def test_existing_single_range_and_exact_boundary(self):
         for size in (1, 4, MAX_DUMP_BYTES):
             chunks = plan_dump(f"0x1000:{size}", Path("out.mem"))

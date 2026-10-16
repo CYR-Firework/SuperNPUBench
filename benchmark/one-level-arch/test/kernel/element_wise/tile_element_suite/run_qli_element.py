@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import re
 import subprocess
+import sys
 import time
 
 from compare_memory import load_symbols
@@ -15,6 +16,9 @@ import qli_histogram_fixture
 import qli_topk_fixture
 import qli_norm_fixture
 import qli_popn_fixture
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "verification"))
+from gfrun_dump import has_success_finisher
 
 OPTIONS = ('enable-all-vector-as-tilereg=true', 'linxv5-enable-HL-Inst-Opt=true',
            'linxv5-enable-dim-opt=true', 'linxv5-enable-ldst-bridge=false',
@@ -165,7 +169,8 @@ def main():
     before = {str(path): sha(path) for path in binaries}
     inputs = [suite / f'qli_{args.kind}.cpp', Path(fixture.__file__),
               bench / 'kernels/solution/qli/qli_element.hpp', Path(__file__).resolve(),
-              suite / 'compare_memory.py', suite / 'check_disassembly.py']
+              suite / 'compare_memory.py', suite / 'check_disassembly.py',
+              bench / 'verification/gfrun_dump.py']
     if args.kind in ('topk', 'popn'):
         inputs += [bench / 'kernels/solution/qli/qli_pto_opt_simple.hpp',
                    Path(qli_histogram_fixture.__file__)]
@@ -239,7 +244,7 @@ def main():
             'elapsed_seconds': time.monotonic() - started,
             'timeout_seconds': 120, 'timed_out': timed_out,
             'exit_code': exit_code}, indent=2) + '\n')
-    assert 'Suaccelss to Reach the End of Benchmark! R2 = 0' in (out / 'gfrun.log').read_text()
+    assert has_success_finisher((out / 'gfrun.log').read_text())
     memory = (out / 'memory.bin').read_bytes()
     assert len(memory) == end - start
     storage_profiles = (json.loads((out / 'fixture/storage_profiles.json').read_text())

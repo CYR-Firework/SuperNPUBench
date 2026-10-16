@@ -13,7 +13,7 @@ import qli_original_fixture as fixture
 sys.path.insert(0, str(fixture.SUITE))
 from compare_memory import load_symbols
 from check_disassembly import function_body_exact, matching_function_bodies, ir_function_body_exact
-from run_qli_element import OPTIONS
+from run_qli_element import OPTIONS, has_success_finisher
 
 
 def digest(path):
@@ -94,7 +94,8 @@ def main():
              source / 'qli_check_opt_dynamic.cpp', source.parent / 'compile.all',
              bench / 'test/common/_start.s', fixture.SUITE / 'qli_topk_fixture.py',
              fixture.SUITE / 'qli_histogram_fixture.py', fixture.SUITE / 'compare_memory.py',
-             fixture.SUITE / 'check_disassembly.py', fixture.SUITE / 'run_qli_element.py']
+             fixture.SUITE / 'check_disassembly.py', fixture.SUITE / 'run_qli_element.py',
+             bench / 'verification/gfrun_dump.py']
     files += list((bench / 'kernels/solution/qli').glob('*.hpp'))
     files += list(args.api_include.rglob('*.hpp'))
     files += list((args.resource_dir / 'include').rglob('*.hpp'))
@@ -167,7 +168,7 @@ def main():
             artifacts[str(case / 'kernel.elf')] = digest(case / 'kernel.elf')
             run([args.gfrun, '--pto059-execution-mask-dev', '-s', f'softcore.multiThreadNum={npe}',
                  '--dump-force', *memory_args, '-f', case / 'kernel.elf'], case / 'gfrun.log', 120)
-            assert 'Suaccelss to Reach the End of Benchmark! R2 = 0' in (case / 'gfrun.log').read_text()
+            assert has_success_finisher((case / 'gfrun.log').read_text())
             for name, expected in wants.items():
                 actual = (case / (name + '.dump.bin')).read_bytes()
                 if name == 'qli_workspace':
