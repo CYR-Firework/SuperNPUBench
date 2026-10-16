@@ -119,8 +119,8 @@ script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 bench_root=$(cd "$script_dir/.." && pwd)
 case_dir="$bench_root/test/kernel/element_wise/tile_element_suite"
 built_dir="$bench_root/output/kernel/element_wise/tile_element_suite/elf"
-api_source_include=$(cd "$API_INCLUDE" && pwd)
-api_source_root=$(cd "$api_source_include/.." && pwd)
+api_source_include=$API_INCLUDE
+api_source_root=$(dirname "$API_INCLUDE")
 installed_api_include="$RESOURCE_DIR/include/tileop-api"
 gfrun=${GFRUN:-"$SSM/bin/gfrun"}
 gfsim=${GFSIM:-"$SSM/bin/gfsim"}
@@ -136,6 +136,51 @@ if [[ -e "$artifact_dir" ]]; then
     exit 1
 fi
 mkdir -p "$artifact_dir"
+
+# These globals survive function unwinding when set -e aborts a case.
+active_artifact=$artifact_dir
+active_elf="$artifact_dir/not-built.elf"
+active_golden="$artifact_dir/golden"
+active_dump_range=""
+active_pe_count=1
+provenance_source_args=()
+[[ -z ${COMPILER_SOURCE_ROOT:-} ]] || provenance_source_args+=(--compiler-source "$COMPILER_SOURCE_ROOT")
+[[ -z ${MODEL_SOURCE_ROOT:-} ]] || provenance_source_args+=(--model-source "$MODEL_SOURCE_ROOT")
+[[ -z ${API_SOURCE_ROOT:-} ]] || provenance_source_args+=(--api-source "$API_SOURCE_ROOT")
+
+write_active_provenance() {
+    local run_status=$1
+    local verify_args=()
+    if (( run_status == 0 )) || [[ -f "$active_artifact/input-provenance.json" ]]; then
+        verify_args=(--verify-inputs-from "$active_artifact/input-provenance.json")
+    fi
+    python3 "$bench_root/test/kernel/sort/element_atomic_topk/write_provenance.py" \
+        --out "$active_artifact/provenance.json" \
+        --elf "$active_elf" --compiler-bin "$COMPILER_DIR" \
+        --model-root "$SSM" --runtime-root "$LINX_RUNTIME_ROOT" \
+        --api-include "$api_source_include" --bench-root "$bench_root/../.." \
+        --golden-dir "$active_golden" --target-triple "$TARGET_TRIPLE" \
+        --sysroot "$SYSROOT" --resource-dir "$RESOURCE_DIR" \
+        --artifact-dir "$active_artifact" --dump-range "$active_dump_range" \
+        --models "$MODELS" --pe-count "$active_pe_count" --gfrun "$gfrun" \
+        --gfsim "$gfsim" --run-exit-status "$run_status" --allow-incomplete \
+        ${provenance_source_args[@]+"${provenance_source_args[@]}"} \
+        ${verify_args[@]+"${verify_args[@]}"} \
+        > "$active_artifact/provenance.log" 2>&1
+}
+
+record_failure() {
+    local run_status=$?
+    trap - EXIT
+    if (( run_status != 0 )); then
+        set +e
+        write_active_provenance "$run_status"
+        exit "$run_status"
+    fi
+}
+trap record_failure EXIT
+api_source_include=$(cd "$API_INCLUDE" && pwd)
+api_source_root=$(cd "$api_source_include/.." && pwd)
 
 for required in \
     "$COMPILER_DIR/clang++" \
@@ -204,6 +249,11 @@ run_case() {
     local disassembly="$case_artifact/$case_name.diss"
     local symbols="$case_artifact/$case_name.symbols"
     local ir="$case_artifact/$case_name.ll"
+    active_artifact=$case_artifact
+    active_elf=$elf
+    active_golden=$golden
+    active_dump_range=""
+    active_pe_count=$pe_count
     mkdir -p "$golden"
 
     python3 "$case_dir/generate_case.py" --case "$case_name" --out "$golden"
@@ -292,6 +342,7 @@ run_case() {
     dump_range=$(python3 "$case_dir/compare_memory.py" \
         --symbols "$symbols" --golden "$golden" --print-range)
     local dump_base=${dump_range%%:*}
+    active_dump_range=$dump_range
 
     python3 "$bench_root/test/kernel/sort/element_atomic_topk/write_provenance.py" \
         --out "$case_artifact/input-provenance.json" \
@@ -302,6 +353,7 @@ run_case() {
         --sysroot "$SYSROOT" --resource-dir "$RESOURCE_DIR" \
         --artifact-dir "$case_artifact" --dump-range "$dump_range" \
         --models "$MODELS" --pe-count "$pe_count" --gfrun "$gfrun" --gfsim "$gfsim" --run-exit-status 125 \
+        ${provenance_source_args[@]+"${provenance_source_args[@]}"} \
         > "$case_artifact/input-provenance.log" 2>&1
 
     python3 "$script_dir/gfrun_dump.py" \
@@ -353,17 +405,12 @@ run_case() {
 
     fi
 
-    python3 "$bench_root/test/kernel/sort/element_atomic_topk/write_provenance.py" \
-        --out "$case_artifact/provenance.json" \
-        --elf "$elf" --compiler-bin "$COMPILER_DIR" \
-        --model-root "$SSM" --runtime-root "$LINX_RUNTIME_ROOT" \
-        --api-include "$api_source_include" --bench-root "$bench_root/../.." \
-        --golden-dir "$golden" --target-triple "$TARGET_TRIPLE" \
-        --sysroot "$SYSROOT" --resource-dir "$RESOURCE_DIR" \
-        --artifact-dir "$case_artifact" --dump-range "$dump_range" \
-        --models "$MODELS" --pe-count "$pe_count" --gfrun "$gfrun" --gfsim "$gfsim" --run-exit-status 0 \
-        --verify-inputs-from "$case_artifact/input-provenance.json" \
-        > "$case_artifact/provenance.log" 2>&1
+    write_active_provenance 0
+    active_artifact=$artifact_dir
+    active_elf="$artifact_dir/not-built.elf"
+    active_golden="$artifact_dir/golden"
+    active_dump_range=""
+    active_pe_count=1
     echo "$case_name: PASS"
 }
 

@@ -7,6 +7,9 @@
 
 #include "benchmark.h"
 #include "linx_print.h"
+#ifdef RES_CHECK
+#include "guard_io.h"
+#endif
 
 #include <cstddef>
 #include <cstdint>
@@ -163,5 +166,14 @@ int main() {
 
   linxi_puts("=== elementwise_atomic_histogram ===");
   linxi_put_kv("failures", failures);
+#ifdef RES_CHECK
+  guard_dump_bin(CHK_DIR "/out_bins.bin", elementwise_atomic_histogram_bins,
+                 sizeof(elementwise_atomic_histogram_bins));
+  guard_dump_bin(CHK_DIR "/out_observed.bin",
+                 elementwise_atomic_histogram_observed,
+                 sizeof(elementwise_atomic_histogram_observed));
+  guard_dump_bin(CHK_DIR "/out_status.bin", elementwise_atomic_histogram_status,
+                 sizeof(elementwise_atomic_histogram_status));
+#endif
   return failures == 0u ? 0 : 1;
 }

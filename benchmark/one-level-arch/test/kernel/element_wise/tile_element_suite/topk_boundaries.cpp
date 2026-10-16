@@ -219,6 +219,11 @@ uint32_t verify_case(const BoundaryCase &test_case, const TopKResult &result,
 
 int main() {
   uint32_t total_failures = 0u;
+  // Zero denotes a verified pass. Seed only the selected shard so a skipped
+  // case cannot be mistaken for success while inactive status slots stay zero.
+  for (std::size_t case_index = kFirstCase; case_index < kLastCase;
+       ++case_index)
+    topk_boundaries_status[case_index] = kSentinel;
   BENCHSTART;
 #pragma clang loop unroll(disable)
   for (std::size_t case_index = kFirstCase; case_index < kLastCase;

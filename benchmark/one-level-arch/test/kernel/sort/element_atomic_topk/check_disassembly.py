@@ -229,6 +229,16 @@ def validate_segment(segment: list[Instruction], ordinal: int) -> None:
         for index in positions("BSTART.TLSU")
         if re.search(r"\bMGATHER\.ADD,\s*U32\b", segment[index].operands)
     ]
+    radix_shift = [
+        index
+        for index in positions("BSTART.TEPL")
+        if re.search(r"\bTSHRS?,\s*U32\b", segment[index].operands)
+    ]
+    radix_mask = [
+        index
+        for index in positions("BSTART.TEPL")
+        if re.search(r"\bTANDS?,\s*U32\b", segment[index].operands)
+    ]
     if len(tci) < 2:
         raise CheckError(f"helper {ordinal}: expected lane and one-value TCI")
     if len(compares) != expected_compares:
@@ -239,6 +249,13 @@ def validate_segment(segment: list[Instruction], ordinal: int) -> None:
         raise CheckError(f"helper {ordinal}: expected exactly one TLEA")
     if len(atomic) != 1:
         raise CheckError(f"helper {ordinal}: expected exactly one MGATHER.ADD")
+    if len(radix_shift) != 1:
+        raise CheckError(f"helper {ordinal}: expected exactly one radix shift")
+    expected_masks = 1 if ordinal == 2 else 0
+    if len(radix_mask) != expected_masks:
+        raise CheckError(
+            f"helper {ordinal}: expected exactly {expected_masks} radix masks"
+        )
 
     compare_dsts = [destination(segment[index].operands) for index in compares]
     if any(not GPR.fullmatch(value) for value in compare_dsts):
@@ -248,6 +265,11 @@ def validate_segment(segment: list[Instruction], ordinal: int) -> None:
             sum(index < atomic[0] for index in scalar_and) >=
             max(0, expected_compares - 1)):
         raise CheckError(f"site {ordinal}: predicate/TLEA/value setup follows atomic")
+    if not radix_shift[0] < tlea[0] or any(
+            not radix_shift[0] < index < tlea[0] for index in radix_mask):
+        raise CheckError(
+            f"site {ordinal}: radix shift/mask does not feed address generation"
+        )
 
     atomic_index = atomic[0]
     bundle_end = next(
@@ -401,6 +423,21 @@ def self_test(text: str) -> None:
         re.sub(r"(TCMPS[^\n]*->)\s*[^\s,]+", r"\1M#1", text, count=1),
     )
     for ordinal, segment in enumerate(atomic_segments(text)):
+        radix_operations = [
+            inst for inst in segment
+            if inst.mnemonic == "BSTART.TEPL" and
+            re.search(r"\b(?:TSHRS?|TANDS?),\s*U32\b", inst.operands)
+        ]
+        for operation in radix_operations:
+            mnemonic = re.search(r"\b(TSHRS?|TANDS?)\b", operation.line)
+            assert mnemonic is not None
+            removed = (operation.line[:mnemonic.start()] +
+                       mnemonic.group(1) + "_REMOVED" +
+                       operation.line[mnemonic.end():])
+            expect_rejected(
+                f"site{ordinal}: missing {mnemonic.group(1)}",
+                text.replace(operation.line, removed, 1),
+            )
         compares = [inst for inst in segment if inst.mnemonic == "TCMPS"]
         # Scalar expressions can add masked Tile arithmetic before TLEA.
         # Mutation canaries must target the atomic bundle's binder, not an

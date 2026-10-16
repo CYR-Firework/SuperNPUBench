@@ -103,6 +103,8 @@ def main() -> int:
 
     write_u32(args.out / files["element_atomic_topk_coherence_input"], [0] * 128)
     write_u32(args.out / files["element_atomic_topk_coherence_hist"], [10] + [0] * 255)
+    # The two relaxed atomics may execute in either lane order.  The binary
+    # keeps one canonical legal ordering; compare_memory.py accepts both.
     coherence_old = [0] * 128
     coherence_old[0], coherence_old[1] = 7, 8
     write_u32(args.out / files["element_atomic_topk_coherence_old"], coherence_old)
@@ -117,7 +119,16 @@ def main() -> int:
         "strictly_greater": strictly_greater,
         "equal_needed": equal_needed,
         "segments": [
-            {"symbol": symbol, "file": filename, "dtype": "u32"}
+            {
+                "symbol": symbol,
+                "file": filename,
+                "dtype": "u32",
+                **(
+                    {"comparison": "relaxed_atomic_pair_7_8"}
+                    if symbol == "element_atomic_topk_coherence_old"
+                    else {}
+                ),
+            }
             for symbol, filename in files.items()
         ],
         "non_deterministic_observations": [

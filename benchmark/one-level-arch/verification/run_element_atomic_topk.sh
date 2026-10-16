@@ -58,13 +58,59 @@ else
 fi
 gfrun=${GFRUN:-"$SSM/bin/gfrun"}
 gfsim=${GFSIM:-"$SSM/bin/gfsim"}
-require_selected_models "$MODELS" "$gfrun" "$gfsim"
 
 if [[ -e "$artifact_dir" ]]; then
     echo "artifact directory already exists: $artifact_dir" >&2
     exit 1
 fi
 mkdir -p "$artifact_dir"
+elf="$artifact_dir/element_atomic_topk.elf"
+ir="$artifact_dir/element_atomic_topk.ll"
+dump_range=""
+provenance_source_args=()
+[[ -z ${COMPILER_SOURCE_ROOT:-} ]] || provenance_source_args+=(--compiler-source "$COMPILER_SOURCE_ROOT")
+[[ -z ${MODEL_SOURCE_ROOT:-} ]] || provenance_source_args+=(--model-source "$MODEL_SOURCE_ROOT")
+[[ -z ${API_SOURCE_ROOT:-} ]] || provenance_source_args+=(--api-source "$API_SOURCE_ROOT")
+provenance_model_args=(--models "$MODELS" --gfrun "$gfrun")
+if [[ "$MODELS" == gfrun,gfsim ]]; then
+    provenance_model_args+=(--gfsim "$gfsim")
+fi
+
+write_final_provenance() {
+    local run_status=$?
+    trap - EXIT
+    set +e
+    local verify_args=()
+    if (( run_status == 0 )) || [[ -f "$artifact_dir/input-provenance.json" ]]; then
+        verify_args=(--verify-inputs-from "$artifact_dir/input-provenance.json")
+    fi
+    python3 "$case_dir/element_atomic_topk/write_provenance.py" \
+        --out "$artifact_dir/provenance.json" \
+        --elf "$elf" --compiler-bin "$COMPILER_DIR" \
+        --model-root "$SSM" --runtime-root "$LINX_RUNTIME_ROOT" \
+        --api-include "$API_INCLUDE" --bench-root "$bench_root/../.." \
+        --golden-dir "$artifact_dir/golden" --target-triple "$TARGET_TRIPLE" \
+        --sysroot "$SYSROOT" --resource-dir "$RESOURCE_DIR" \
+        --artifact-dir "$artifact_dir" --dump-range "$dump_range" \
+        "${provenance_model_args[@]}" \
+        --run-exit-status "$run_status" --allow-incomplete \
+        ${provenance_source_args[@]+"${provenance_source_args[@]}"} ${verify_args[@]+"${verify_args[@]}"} \
+        > "$artifact_dir/provenance.log" 2>&1
+    local provenance_status=$?
+    set -e
+    if (( run_status != 0 )); then
+        exit "$run_status"
+    fi
+    if (( provenance_status == 0 )); then
+        echo "element_atomic_topk: PASS models=$MODELS"
+        echo "ELF: $elf"
+        echo "artifacts: $artifact_dir"
+    fi
+    exit "$provenance_status"
+}
+trap write_final_provenance EXIT
+
+require_selected_models "$MODELS" "$gfrun" "$gfsim"
 mkdir -p "$bench_root/output"
 
 for required in \
@@ -84,6 +130,22 @@ for required in \
     fi
 done
 
+# Keep the selected resource tree intact and install the requested API into
+# this run's resource overlay before -mlxbc can preinclude stale headers.
+resource_overlay="$artifact_dir/clang-resource"
+mkdir -p "$resource_overlay"
+cp -R "$RESOURCE_DIR/." "$resource_overlay/"
+RESOURCE_DIR=$resource_overlay
+rm -rf "$RESOURCE_DIR/include/tileop-api"
+api_source_root=$(cd "$API_INCLUDE/.." && pwd)
+if [[ -f "$api_source_root/Makefile" && -d "$api_source_root/include" ]]; then
+    make -C "$api_source_root" install \
+        INSTALL_DIR="$RESOURCE_DIR/include/tileop-api" \
+        2>&1 | tee "$artifact_dir/api-install.log"
+else
+    cp -R "$API_INCLUDE" "$RESOURCE_DIR/include/tileop-api"
+fi
+
 set +e
 "$case_dir/element_atomic_topk/check_reference.sh" \
     > >(tee "$artifact_dir/reference.log") 2>&1
@@ -102,9 +164,7 @@ make -C "$case_dir" TESTCASE=element_atomic_topk \
     RESOURCE_DIR="$RESOURCE_DIR" \
     API_INCLUDE="$API_INCLUDE" \
     clean all 2>&1 | tee "$artifact_dir/build.log"
-elf="$artifact_dir/element_atomic_topk.elf"
 cp "$built_elf" "$elf"
-ir="$artifact_dir/element_atomic_topk.ll"
 make -B -C "$case_dir" TESTCASE=element_atomic_topk \
     COMPILER_DIR="$COMPILER_DIR" \
     TARGET_TRIPLE="$TARGET_TRIPLE" \
@@ -127,35 +187,7 @@ for step in "${steps[@]}"; do
     printf '%s\n' 125 > "$artifact_dir/$step.exit"
 done
 
-provenance_model_args=(--models "$MODELS" --gfrun "$gfrun")
-if [[ "$MODELS" == gfrun,gfsim ]]; then
-    provenance_model_args+=(--gfsim "$gfsim")
-fi
 
-write_final_provenance() {
-    local run_status=$?
-    trap - EXIT
-    set +e
-    python3 "$case_dir/element_atomic_topk/write_provenance.py" \
-        --out "$artifact_dir/provenance.json" \
-        --elf "$elf" --compiler-bin "$COMPILER_DIR" \
-        --model-root "$SSM" --runtime-root "$LINX_RUNTIME_ROOT" \
-        --api-include "$API_INCLUDE" --bench-root "$bench_root/../.." \
-        --golden-dir "$artifact_dir/golden" --target-triple "$TARGET_TRIPLE" \
-        --sysroot "$SYSROOT" --resource-dir "$RESOURCE_DIR" \
-        --artifact-dir "$artifact_dir" --dump-range "$dump_range" \
-        "${provenance_model_args[@]}" \
-        --run-exit-status "$run_status" \
-        --verify-inputs-from "$artifact_dir/input-provenance.json" \
-        > "$artifact_dir/provenance.log" 2>&1
-    local provenance_status=$?
-    set -e
-    if (( run_status != 0 )); then
-        exit "$run_status"
-    fi
-    exit "$provenance_status"
-}
-trap write_final_provenance EXIT
 
 set +e
 python3 "$case_dir/element_atomic_topk/check_disassembly.py" \
@@ -189,7 +221,7 @@ python3 "$case_dir/element_atomic_topk/write_provenance.py" \
     --golden-dir "$artifact_dir/golden" --target-triple "$TARGET_TRIPLE" \
     --sysroot "$SYSROOT" --resource-dir "$RESOURCE_DIR" \
     --artifact-dir "$artifact_dir" --dump-range "$dump_range" \
-    "${provenance_model_args[@]}" --run-exit-status 125 \
+    "${provenance_model_args[@]}" ${provenance_source_args[@]+"${provenance_source_args[@]}"} --run-exit-status 125 \
     > "$artifact_dir/input-provenance.log" 2>&1
 
 set +e
@@ -232,7 +264,7 @@ if [[ "$MODELS" == gfrun,gfsim ]]; then
     grep -Eq 'Total Cycles|total cycles|cycle_count' "$artifact_dir/gfsim.log"
     if grep -Eq 'invariants:.*stq_conservation=OK.*a3_tile_violation=0([[:space:]]|$)' \
         "$artifact_dir/gfsim.log" &&
-        ! grep -Eq 'LOG_ERROR|ASSERTION FAILED|a3_tile_violation peId=' \
+        ! grep -Eiq 'LOG_ERROR|ASSERTION|(^|[^[:alpha:]])assert([^[:alpha:]]|$)|a3_tile_violation peId=' \
             "$artifact_dir/gfsim.log"; then
         printf '0\n' > "$artifact_dir/gfsim-invariants.exit"
     else
@@ -256,7 +288,3 @@ if [[ "$MODELS" == gfrun,gfsim ]]; then
         exit "$gfsim_memory_status"
     fi
 fi
-
-echo "element_atomic_topk: PASS models=$MODELS"
-echo "ELF: $elf"
-echo "artifacts: $artifact_dir"

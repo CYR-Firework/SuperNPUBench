@@ -32,6 +32,11 @@ ifndef API_INCLUDE
 $(error API_INCLUDE is required)
 endif
 
+# Several fixtures intentionally share one source file with different compile
+# definitions. Keep their objects in testcase-specific directories so ordinary
+# sequential make invocations cannot reuse an object from another profile.
+override CASE_SRC_DIR = $(CATEGORY)/src/$(TESTCASE)
+
 TARGET_TRIPLE ?= linx64v5-unknown-linux-musl
 TARGET_FLAGS := --target=$(TARGET_TRIPLE) --sysroot=$(SYSROOT) \
 	-resource-dir=$(RESOURCE_DIR)

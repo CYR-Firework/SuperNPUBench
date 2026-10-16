@@ -242,8 +242,10 @@ int main() {
 
   int coherence_failures = 0;
   coherence_failures += coherence_probe.initial != 0U;
-  coherence_failures += element_atomic_topk_coherence_old[0] != 7U;
-  coherence_failures += element_atomic_topk_coherence_old[1] != 8U;
+  const uint32_t coherence_old0 = element_atomic_topk_coherence_old[0];
+  const uint32_t coherence_old1 = element_atomic_topk_coherence_old[1];
+  coherence_failures += !((coherence_old0 == 7U && coherence_old1 == 8U) ||
+                          (coherence_old0 == 8U && coherence_old1 == 7U));
   coherence_failures += coherence_probe.after_atomic != 9U;
   coherence_failures += coherence_probe.after_scalar != 10U;
   for (std::size_t i = 0; i < kCoherenceProbePaddedCount; ++i) {

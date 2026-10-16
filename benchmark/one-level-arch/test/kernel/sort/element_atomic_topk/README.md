@@ -43,8 +43,8 @@ golden segments contain its input, final histogram, old-value array, and scalar
 observations `[initial, after_atomic, after_scalar, failures] = [0, 9, 10, 0]`. A volatile scalar load first caches a zero histogram
 line, a volatile scalar store makes bin zero dirty with value 7, and a
 two-element Tile/element-wise region performs two native masked atomic adds.
-Their old-value Tile stores must contain 7 at logical element 0 and 8 at
-logical element 1, every inactive old-value element must remain zero, and the histogram
+Their old-value Tile stores must contain the relaxed-atomic permutation
+`[7, 8]` or `[8, 7]`, every inactive old-value element must remain zero, and the histogram
 must become 9. A later volatile scalar store/load pair must observe 10, proving
 that the later scalar writer supersedes the queued tile commit. Any mismatch
 sets status failure bit `0x20`.
@@ -129,3 +129,21 @@ so a valid key zero is distinct from an inactive or cleared candidate. Dynamic
 QLI also predicates candidates by the actual tail width. Inputs and the outer
 TopK output/workspace allocations are disjoint; the inner key/histogram helpers
 separately provide their documented complete-chunk alias snapshots.
+
+## Failed runs and external build directories
+
+Each fresh run directory records `provenance.json` even when setup, compilation,
+model execution or comparison fails. Missing artifacts have null hashes and a
+`provenance_errors` entry; the original failure status is retained. An incomplete
+record cannot turn a successful exit into a qualified result. Reusing an existing
+artifact directory is rejected.
+
+The primary runner copies `RESOURCE_DIR` into its own `clang-resource` directory
+and installs the selected `API_INCLUDE` there before compilation. This ensures
+`-mlxbc` uses the requested API and leaves the caller's resource tree intact.
+Runtime archives are fingerprinted from the actual `SYSROOT` override.
+
+`COMPILER_DIR` and `SSM` may be external build directories. Set
+`COMPILER_SOURCE_ROOT`, `MODEL_SOURCE_ROOT` and optionally `API_SOURCE_ROOT` to
+record their source checkouts. Without an available checkout, binary hashes are
+still recorded and repository identity is explicitly marked unavailable.

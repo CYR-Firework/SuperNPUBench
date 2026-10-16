@@ -3,7 +3,9 @@
 `src/elementwise_if_predicates.cpp` runs the same masked `TADD`/`TSUB` arms
 under `GT`, `LT`, `GE`, `LE`, `EQ`, `NE`, and `!(GT)` conditions.  Its input
 contains positive, negative, and zero lanes, so both predicate arms are live
-in the functional model.
+in the functional model. Each of the six comparison results and the explicit
+`!(GT)` inversion result has separate storage. The independent golden checks
+all seven complete 128-element outputs.
 
 Build and disassemble it with:
 

@@ -9,6 +9,7 @@ import json
 import tempfile
 from unittest import mock
 import sys
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -59,6 +60,10 @@ class InputProvenanceTest(unittest.TestCase):
                 p = root / "sysroot/usr/lib" / name
                 p.parent.mkdir(parents=True, exist_ok=True)
                 p.write_bytes(b"runtime")
+            # A documented SYSROOT override must win over the runtime root.
+            decoy_lib = root / "different-runtime/sysroot/usr/lib/libc.a"
+            decoy_lib.parent.mkdir(parents=True)
+            decoy_lib.write_bytes(b"unused runtime")
             for name in ("api/common/pto_tileop.hpp",
                          "resource/include/tileop-api/common/pto_tileop.hpp",
                          "golden/expected.bin", "test.elf", "gfrun"):
@@ -70,7 +75,7 @@ class InputProvenanceTest(unittest.TestCase):
             output = root / "provenance.json"
             argv = ["write_provenance.py", "--out", str(output),
                     "--elf", str(root / "test.elf"), "--compiler-bin", str(compiler),
-                    "--model-root", str(root), "--runtime-root", str(root),
+                    "--model-root", str(root), "--runtime-root", str(root / "different-runtime"),
                     "--api-include", str(root / "api"), "--bench-root", str(root),
                     "--golden-dir", str(root / "golden"), "--target-triple", "linx64v5",
                     "--sysroot", str(root / "sysroot"),
@@ -89,6 +94,9 @@ class InputProvenanceTest(unittest.TestCase):
                     data = json.loads(output.read_text())
                     self.assertEqual(data["artifacts"]["clang"],
                                      hashlib.sha256(b"actual compiler").hexdigest())
+                    self.assertEqual(set(data["artifacts"]["runtime"]),
+                                     {str(root / "sysroot/usr/lib" / name) for name in
+                                      ("libc.a", "libc++.a", "libc++abi.a", "libunwind.a")})
                     self.assertEqual(data["target"]["pe_count"], pe_count)
                     self.assertIn(f"softcore.multiThreadNum={pe_count}",
                                   data["commands"]["gfrun"])
@@ -123,6 +131,101 @@ class InputProvenanceTest(unittest.TestCase):
                     RuntimeError, "validation inputs changed after execution"
                 ):
                     verify_immutable_inputs(before, after)
+
+
+class FailureAndExternalBuildTest(unittest.TestCase):
+    def make_arguments(self, root: Path, complete: bool, status: int = 0):
+        artifact = root / "artifacts"
+        artifact.mkdir(exist_ok=True)
+        if complete:
+            for name in ("bin/clang++", "bin/ld.lld", "bin/llvm-objdump", "gfrun",
+                         "test.elf", "golden/expected.bin", "api/common/pto_tileop.hpp",
+                         "resource/include/tileop-api/common/pto_tileop.hpp",
+                         *["sysroot/usr/lib/" + name for name in
+                           ("libc.a", "libc++.a", "libc++abi.a", "libunwind.a")]):
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"fixture")
+            compiler = root / "bin/clang++"
+            compiler.write_text("#!/bin/sh\nprintf 'clang version fixture\\n'\n")
+            compiler.chmod(0o755)
+        return ["write_provenance.py", "--out", str(artifact / "provenance.json"),
+                "--elf", str(root / "test.elf"), "--compiler-bin", str(root / "bin"),
+                "--model-root", str(root / "model-build"), "--runtime-root", str(root),
+                "--api-include", str(root / "api"), "--bench-root", str(root),
+                "--golden-dir", str(root / "golden"), "--target-triple", "linx64v5",
+                "--sysroot", str(root / "sysroot"), "--resource-dir", str(root / "resource"),
+                "--artifact-dir", str(artifact), "--run-exit-status", str(status),
+                "--models", "gfrun", "--gfrun", str(root / "gfrun")]
+
+    def run_writer(self, args):
+        with mock.patch.object(sys, "argv", args):
+            status = write_provenance.main()
+        return status, json.loads(Path(args[args.index("--out") + 1]).read_text())
+
+    def test_external_builds_without_git_keep_binary_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            args = self.make_arguments(root, True) + ["--dump-range", "0x1000:4"]
+            status, data = self.run_writer(args)
+            self.assertEqual(status, 0)
+            for repo in data["repositories"].values():
+                self.assertFalse(repo["identity_available"])
+                self.assertIsNone(repo["head"])
+            self.assertEqual(data["artifacts"]["clang"],
+                             write_provenance.sha256_file(root / "bin/clang++"))
+
+    def test_explicit_source_checkout_for_external_binaries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            args = self.make_arguments(root, True) + ["--dump-range", "0x1000:4"]
+            source = root / "source"
+            subprocess.run(["git", "init", "-q", str(source)], check=True)
+            subprocess.run(["git", "-c", "commit.gpgsign=false", "-c", "user.name=Fixture",
+                            "-c", "user.email=fixture@example.invalid", "commit", "-qm",
+                            "fixture", "--allow-empty"], cwd=source, check=True)
+            for name in ("compiler", "model", "api"):
+                args += ["--" + name + "-source", str(source)]
+            status, data = self.run_writer(args)
+            self.assertEqual(status, 0)
+            for name in ("compiler", "model", "tileop_api"):
+                self.assertTrue(data["repositories"][name]["identity_available"])
+                self.assertEqual(data["repositories"][name]["root"], str(source.resolve()))
+
+    def test_early_failure_writes_partial_provenance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            status, data = self.run_writer(
+                self.make_arguments(root, False, 37) + ["--allow-incomplete"])
+            self.assertEqual(status, 0)
+            self.assertEqual(data["run_exit_status"], 37)
+            self.assertEqual(data["provenance_status"], "incomplete")
+            self.assertIsNone(data["artifacts"]["elf"]["sha256"])
+            self.assertEqual(data["commands"], {})
+            self.assertEqual(len(data["content_id"]), 64)
+            self.assertFalse((root / "artifacts/gfrun.mem").exists())
+
+    def test_missing_inputs_never_become_success(self):
+        with tempfile.TemporaryDirectory() as directory:
+            status, data = self.run_writer(
+                self.make_arguments(Path(directory), False) + ["--allow-incomplete"])
+            self.assertEqual(status, 1)
+            self.assertEqual(data["run_exit_status"], 1)
+            self.assertEqual(data["execution_exit_status"], 0)
+
+    def test_mutated_input_still_leaves_failure_record(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            args = self.make_arguments(root, True) + ["--dump-range", "0x1000:4"]
+            before = root / "input.json"
+            initial = args[:]
+            initial[initial.index("--out") + 1] = str(before)
+            self.assertEqual(self.run_writer(initial)[0], 0)
+            (root / "test.elf").write_bytes(b"changed")
+            status, data = self.run_writer(args + ["--verify-inputs-from", str(before)])
+            self.assertEqual(status, 1)
+            self.assertEqual(data["run_exit_status"], 1)
+            self.assertTrue(any("artifacts.elf.sha256" in p for p in data["provenance_errors"]))
 
 
 if __name__ == "__main__":

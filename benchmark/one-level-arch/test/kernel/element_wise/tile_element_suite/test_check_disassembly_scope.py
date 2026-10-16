@@ -3,6 +3,7 @@
 
 import importlib.util
 from pathlib import Path
+import subprocess
 import unittest
 
 
@@ -14,6 +15,20 @@ SPEC.loader.exec_module(CHECKER)
 
 
 class CheckerFunctionScopeTest(unittest.TestCase):
+    SELECTED_MASK = """
+   100: ce619181              BSTART.TEPL TCMPS, U32
+   104: 00080813              B.IOR [s5], ->s5
+   108: 00f82805              and s5, s4, ->s5
+   10c: cad19181              BSTART.TEPL TCMPS, U32
+   110: 00020893              B.IOR [a2], ->s6
+   114: 0108a785              and s6, s5, ->s4
+   118: cae19181              BSTART.TEPL TLEA, U32
+   11c: c8c11181              BSTART.TLSU MGATHER.ADD, U32
+   120: 01f03ea3              B.DATR CUBE_M32, Zero
+   124: 04f28013              B.IOR [a3,s4,zero], ExecMaskPresent
+   128: ce619181              BSTART.TEPL TCI, U32
+"""
+
     def test_exact_extractors_do_not_select_prefix_clone(self):
         disassembly = """
 00000000 <kernel.clone>:
@@ -119,6 +134,43 @@ define void @process_gather_tile_store() { ret void }
         with self.assertRaises(CHECKER.CheckError):
             CHECKER.validate_leaf_gather_scatter(
                 disassembly, "gather_v2_f32_0_original", ir)
+
+    def test_selected_radix_mask_requires_both_comparisons(self):
+        CHECKER.validate_selected_mask_conjunction(self.SELECTED_MASK)
+        broken = self.SELECTED_MASK.replace(
+            "and s6, s5, ->s4", "and s5, s5, ->s4")
+        with self.assertRaises(CHECKER.CheckError):
+            CHECKER.validate_selected_mask_conjunction(broken)
+
+    def test_selected_radix_mask_requires_conjunction(self):
+        broken = self.SELECTED_MASK.replace(
+            "and s6, s5, ->s4", "or s6, s5, ->s4")
+        with self.assertRaises(CHECKER.CheckError):
+            CHECKER.validate_selected_mask_conjunction(broken)
+
+    def test_shared_source_profiles_have_distinct_objects(self):
+        objects = []
+        for case in ("topk_boundaries_0", "topk_boundaries_1",
+                     "topk_boundaries_2"):
+            result = subprocess.run(
+                ["make", "-pn", f"TESTCASE={case}", "SYSROOT=/tmp",
+                 "RESOURCE_DIR=/tmp", "API_INCLUDE=/tmp",
+                 "COMPILER_DIR=/tmp"],
+                cwd=HERE,
+                check=True,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            assignment = next(
+                line for line in result.stdout.splitlines()
+                if line.startswith("OBJ := ")
+            )
+            objects.append(assignment.removeprefix("OBJ := "))
+        self.assertEqual(len(set(objects)), 3)
+        for case, obj in zip(("topk_boundaries_0", "topk_boundaries_1",
+                              "topk_boundaries_2"), objects):
+            self.assertIn(f"/src/{case}/topk_boundaries.o", obj)
 
 
 if __name__ == "__main__":

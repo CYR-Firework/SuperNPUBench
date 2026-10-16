@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import struct
 from pathlib import Path
 
 
@@ -21,6 +22,18 @@ def load_symbols(path: Path) -> dict[str, tuple[int, int]]:
             continue
         symbols[fields[-1]] = (address, size)
     return symbols
+
+
+def matches_segment(item: dict[str, object], actual: bytes, expected: bytes) -> bool:
+    comparison = item.get("comparison", "exact")
+    if comparison == "exact":
+        return actual == expected
+    if comparison == "relaxed_atomic_pair_7_8":
+        if len(actual) != len(expected) or len(actual) < 8:
+            return False
+        old0, old1 = struct.unpack_from("<II", actual)
+        return {old0, old1} == {7, 8} and actual[8:] == expected[8:]
+    raise ValueError(f"unknown comparison mode: {comparison}")
 
 
 def main() -> int:
@@ -78,7 +91,13 @@ def main() -> int:
             failures += 1
             continue
         actual = memory[offset : offset + size]
-        if actual != expected:
+        try:
+            matched = matches_segment(item, actual, expected)
+        except ValueError as error:
+            print(f"{symbol}: {error}")
+            failures += 1
+            continue
+        if not matched:
             first = next(
                 (index for index, pair in enumerate(zip(actual, expected)) if pair[0] != pair[1]),
                 min(len(actual), len(expected)),

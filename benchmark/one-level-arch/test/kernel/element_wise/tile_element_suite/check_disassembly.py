@@ -13,12 +13,121 @@ class CheckError(RuntimeError):
     pass
 
 
+NATIVE_INSTRUCTION = re.compile(
+    r"^\s*[0-9a-f]+:\s+(?:[0-9a-f]{4,8}\s+)+"
+    r"([^\s]+)(?:\s+(.*))?$",
+    re.I,
+)
+GPR = re.compile(r"^(?:zero|ra|sp|gp|tp|t|s[0-9]+|a[0-9]+|x[0-9]+)$")
+
+
 def instruction_lines(text: str) -> list[str]:
     return [
         line
         for line in text.splitlines()
         if re.match(r"^\s*[0-9a-f]+:\s+[0-9a-f]{4,8}\s+", line, re.I)
     ]
+
+
+def native_instruction(line: str) -> tuple[str, str]:
+    match = NATIVE_INSTRUCTION.match(line)
+    if match is None:
+        raise CheckError(f"malformed native instruction: {line}")
+    return match.group(1).upper(), (match.group(2) or "").strip()
+
+
+def validate_selected_mask_conjunction(body: str) -> str:
+    """Prove both selected-radix predicates reach the atomic B.IOR mask."""
+    lines = instruction_lines(body)
+    atomic = [
+        index for index, line in enumerate(lines)
+        if native_instruction(line)[0] == "BSTART.TLSU" and
+        re.search(r"\bMGATHER\.ADD,\s*U32\b", native_instruction(line)[1])
+    ]
+    if len(atomic) != 1:
+        raise CheckError("selected radix needs exactly one native atomic")
+    atomic_index = atomic[0]
+    bundle_end = next(
+        (index for index in range(atomic_index + 1, len(lines))
+         if native_instruction(lines[index])[0].startswith("BSTART.")),
+        len(lines),
+    )
+    binders = [
+        (index, native_instruction(lines[index])[1])
+        for index in range(atomic_index + 1, bundle_end)
+        if native_instruction(lines[index])[0] == "B.IOR" and
+        "EXECMASKPRESENT" in native_instruction(lines[index])[1].upper()
+    ]
+    if len(binders) != 1:
+        raise CheckError("selected radix atomic needs one execution-mask binder")
+    binder_index, binder_operands = binders[0]
+    binder = re.search(r"\[([^,]+),([^,]+),([^\]]+)\]", binder_operands)
+    if binder is None:
+        raise CheckError("selected radix atomic has a malformed B.IOR")
+    _base, mask, unused = (value.strip() for value in binder.groups())
+    if not GPR.fullmatch(mask) or unused != "zero":
+        raise CheckError("selected radix atomic has an invalid mask binding")
+
+    compare_starts = [
+        index for index in range(atomic_index)
+        if native_instruction(lines[index])[0] == "BSTART.TEPL" and
+        re.search(r"\bTCMPS,\s*U32\b", native_instruction(lines[index])[1])
+    ]
+    if len(compare_starts) != 2:
+        raise CheckError("selected radix needs its tail and digit comparisons")
+    compare_writes: dict[int, int] = {}
+    for ordinal, start in enumerate(compare_starts):
+        end = next(
+            (index for index in range(start + 1, atomic_index)
+             if native_instruction(lines[index])[0].startswith("BSTART.")),
+            atomic_index,
+        )
+        writes = [
+            index for index in range(start + 1, end)
+            if native_instruction(lines[index])[0] == "B.IOR" and
+            re.search(r"->\s*([^\s,]+)", native_instruction(lines[index])[1])
+        ]
+        if len(writes) != 1:
+            raise CheckError("selected radix comparison lacks one GPR result")
+        compare_writes[writes[0]] = ordinal
+
+    provenance: dict[str, frozenset[int]] = {}
+    final_and_line: str | None = None
+    first_compare = min(compare_writes)
+    for index in range(first_compare, binder_index):
+        mnemonic, operands = native_instruction(lines[index])
+        destination = re.search(r"->\s*([^\s,]+)", operands)
+        if destination is None:
+            continue
+        dst = destination.group(1)
+        if not GPR.fullmatch(dst) or dst == "zero":
+            continue
+        if index in compare_writes:
+            provenance[dst] = frozenset({compare_writes[index]})
+            continue
+        if mnemonic in ("AND", "C.AND"):
+            operation = re.fullmatch(
+                r"([^,]+),\s*([^,]+),\s*->\s*([^\s,]+)", operands
+            )
+            if operation is None:
+                raise CheckError("selected radix has a malformed scalar AND")
+            lhs, rhs, out = (value.strip() for value in operation.groups())
+            if not all(GPR.fullmatch(value) for value in (lhs, rhs, out)):
+                raise CheckError("selected radix AND does not use plain GPRs")
+            provenance[out] = (provenance.get(lhs, frozenset()) |
+                               provenance.get(rhs, frozenset()))
+            if out == mask:
+                final_and_line = lines[index]
+            continue
+        provenance[dst] = frozenset()
+
+    if provenance.get(mask, frozenset()) != frozenset({0, 1}):
+        raise CheckError(
+            "selected radix atomic mask does not conjunct both predicates"
+        )
+    if final_and_line is None:
+        raise CheckError("selected radix atomic mask is not produced by AND")
+    return final_and_line
 
 
 def function_body(text: str, symbol_fragment: str) -> str:
@@ -1522,7 +1631,12 @@ def validate(text: str, case: str, ir_text: str | None = None) -> None:
     if case == "element_expression_chain":
         validate_expression(text, ir_text)
         return
-    lines = instruction_lines(text)
+    native_text = (
+        function_body(text, case)
+        if case in ("histogram_tile_element", "selected_radix_tile_element")
+        else text
+    )
+    lines = instruction_lines(native_text)
     is_topk = case == "topk_boundaries" or case.startswith("topk_boundaries_")
     expected_sites = 2 if is_topk else 1
     tlea = [line for line in lines if "BSTART.TEPL" in line and "TLEA, U32" in line]
@@ -1592,6 +1706,8 @@ def validate(text: str, case: str, ir_text: str | None = None) -> None:
         if len(re.findall(
                 r"@llvm\.linx\.experimental\.ew\.mgather\.add\.masked", ir)) != 1:
             raise CheckError("generic atomic migration lost its masked atomic")
+        if case == "selected_radix_tile_element":
+            validate_selected_mask_conjunction(native_text)
     if is_topk:
         if ir_text is None:
             raise CheckError("generic Top-K migration requires LLVM IR evidence")
@@ -1869,6 +1985,27 @@ def main() -> int:
                             count=1,
                         ),
                     )
+            if args.case == "selected_radix_tile_element":
+                selected_body = function_body(text, args.case)
+                conjunction = validate_selected_mask_conjunction(selected_body)
+                mnemonic, operands = native_instruction(conjunction)
+                assert mnemonic in ("AND", "C.AND")
+                broken = conjunction.replace(
+                    "\t" + mnemonic.lower() + "\t",
+                    "\tor\t",
+                    1,
+                )
+                if broken == conjunction:
+                    broken = re.sub(
+                        r"\b(?:C\.)?AND\b", "OR", conjunction, count=1,
+                        flags=re.I,
+                    )
+                rejected(
+                    "selected mask is not a conjunction",
+                    text.replace(conjunction, broken, 1),
+                    args.case,
+                    ir_text,
+                )
             if args.case == "elementwise_atomic_histogram":
                 rejected("missing atomic effect", text.replace("MGATHER.ADD, U32", "MGATHER, U32", 1), args.case, ir_text)
                 rejected("missing memory masks", text.replace("ExecMaskPresent", "NoExecMask"), args.case, ir_text)
