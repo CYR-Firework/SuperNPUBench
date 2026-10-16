@@ -117,7 +117,7 @@ class HashTableOracleTest(unittest.TestCase):
 
     def test_cpp_hash_matches_independent_byte_oracle(self):
         root = Path(__file__).resolve().parents[4]
-        header = (root / 'kernels/single_thread/control/hashtable_lookup_simd.hpp').read_text()
+        header = (root / 'kernels/basic_op/control/hashtable_lookup_simd.hpp').read_text()
         start = header.index('inline uint32_t hashTableKey(')
         end = header.index('\ntemplate <', start)
         scalar_hash = header[start:end]

@@ -12,7 +12,7 @@
 
 #include "benchmark.h"
 #include "linx_print.h"
-#include "single_thread/concat/concat_gather.hpp"
+#include "basic_op/concat/detail/concat_gather.hpp"
 
 #include <cstddef>
 #include <cstdint>

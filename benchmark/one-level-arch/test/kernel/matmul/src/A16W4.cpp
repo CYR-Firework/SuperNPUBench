@@ -35,7 +35,7 @@
 #define ALIGN_MASK 0xfffffffffffff000ull
 #define ALIGN 4*1024
 
-#include "single_thread/matmul/matmul_mx.hpp"
+#include "basic_op/matmul/matmul_mx.hpp"
 
 
 #if defined(MATMUL_INPUT_DATA) && defined(RES_CHECK)

@@ -1,6 +1,6 @@
 #include <common/pto_tileop.hpp>
 #include "benchmark.h"
-#include "single_thread/transpose/transpose.hpp"
+#include "basic_op/transpose/detail/transpose.hpp"
 #include <cstdint>
 
 #ifndef TRANSPOSE_PROFILE

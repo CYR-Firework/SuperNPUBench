@@ -6,7 +6,7 @@ The representation avoids an unrelated narrow-integer conversion dependency
 while keeping the two-level radix algorithm identical to a `uint16_t` Top-K.
 
 The complete `topk16` kernel is in
-[`element_atomic_topk.hpp`](../../../../../kernels/single_thread/sort/element_atomic_topk.hpp).
+[`element_atomic_topk.hpp`](../../../../../kernels/basic_op/topk/element_atomic_topk.hpp).
 It contains histogram construction, cutoff selection and collection in one
 function. It includes only the public `<common/pto_tileop.hpp>` API and uses
 `ElementTile<uint32_t, Elements>`, `TPARTVIEW`, `TPARTELEMENT`, ordinary element

@@ -1,6 +1,6 @@
 #include <common/pto_tileop.hpp>
 #include "benchmark.h"
-#include "single_thread/gather/gather.hpp"
+#include "basic_op/gather/detail/gather.hpp"
 #include <cstdint>
 
 #ifndef GATHER_PROFILE

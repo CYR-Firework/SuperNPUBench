@@ -1,64 +1,177 @@
 #!/bin/bash
-# Matmul operator test cases
+# Multi-thread GMMA matmul operator.
 #
-# Supported TYPE values:
-#   - HIF4_HIF4: FP4 x FP4 matmul with microscaling factors
-#   - A16W4: BF16 x FP4 mixed precision matmul
-#   - MASK: Generic matmul with various data types
-#
-# Supported VER values (for HIF4_HIF4):
-#   - BASE: Default implementation with gather
-#   - MX_NOGATHER: Implementation without gather
-#   - MX_NOGATHER_REUSEA: Optimized version with A tile reuse
+# DTYPE selects the element data type for the A/B input tiles (the output C
+# tile is always FP32 inside the kernel). Supported: float, __bf16, __half.
+# Non-float builds emit a _DType<dtype> ELF suffix so binaries of different
+# dtypes don't collide.
 
-set -euo pipefail
+# No set -e (same convention as the fa compile.all): individual testcase
+# failures must not abort the remaining build list.
+set -u
+
 : "${COMPILER_DIR:?Set COMPILER_DIR to the Linx compiler bin directory}"
 
-# ============================================
-# HIF4_HIF4: FP4 x FP4 matmul (BASE) - 6 configs
-# ============================================
-# mgather版本，已弃用
-#make TESTCASE=matmul TYPE=HIF4_HIF4 M=256 N=2048 K=2048 tM=32 tN=32 tK=64
-#make TESTCASE=matmul TYPE=HIF4_HIF4 M=256 N=2048 K=2048 tM=32 tN=32 tK=64
-#make TESTCASE=matmul TYPE=HIF4_HIF4 M=512 N=1280 K=4096 tM=32 tN=32 tK=64
-#make TESTCASE=matmul TYPE=HIF4_HIF4 M=512 N=1280 K=4096 tM=32 tN=32 tK=64
+mm_reusea_gate_ok() {
+    # $1 = dtype, $2 = tN, $3 = tK.  matmul_reuseA uses tM=128, hence a
+    # 32-row Local A shard and a 32-row FP32 accumulator on every PE.
+    local elem shared_b_bytes local_a_bytes local_c_bytes
+    case "$1" in
+        float) elem=4 ;;
+        __bf16|__half) elem=2 ;;
+        *) echo "unsupported reuseA gate dtype: $1" >&2; return 1 ;;
+    esac
+    shared_b_bytes=$(( $2 * $3 * elem ))
+    local_a_bytes=$(( 32 * $3 * elem ))
+    local_c_bytes=$(( 32 * $2 * 4 ))
+    if (( shared_b_bytes > 256 * 1024 )); then
+        echo "SKIP reuseA SharedTReg capacity: $1 tN=$2 tK=$3 B=$((shared_b_bytes / 1024))KiB"
+        return 1
+    fi
+    if (( local_a_bytes + local_c_bytes > 256 * 1024 )); then
+        echo "SKIP reuseA CellReg capacity: $1 tN=$2 tK=$3 A+C=$(((local_a_bytes + local_c_bytes) / 1024))KiB"
+        return 1
+    fi
+    return 0
+}
 
-# ============================================
-# HIF4_HIF4: MX_NOGATHER variant - 2 configs
-# ============================================
-make diss TESTCASE=matmul TYPE=HIF4_HIF4 VER=MX_NOGATHER M=256 N=2048 K=2048 tM=32 tN=64 tK=1024
-make diss TESTCASE=matmul TYPE=HIF4_HIF4 VER=MX_NOGATHER M=512 N=1280 K=4096 tM=32 tN=64 tK=1024
+# Use a 128x256 output tile through FP8. Scale tK with the input element width
+# so these variants retain the same A/B tile byte capacity as FP32. FP4 keeps
+# tM=128 but uses tN=64 below to stay within the aggregate SharedTReg limit.
+# FP32: tK=128; BF16/FP16: 2x; FP8: 4x; FP4: 8x.
+# Build the SharedTile kernel and the variant that keeps each PE's local A
+# shards in its 256 KiB CellReg across N blocks.  For the reuseA configuration,
+# each A shard is 32x128 FP32 = 16 KiB; both K tiles plus the 32 KiB C tile fit
+# comfortably, while the 128 KiB B tile is the only SharedTReg operand.
+make diss TESTCASE=matmul_shared \
+    COMPILER_DIR="$COMPILER_DIR" \
+    DTYPE=float B=1 M=256 N=256 K=256 \
+    tM=128 tN=256 tK=128
 
-# ============================================
-# HIF4_HIF4: MX_NOGATHER_REUSEA variant - 2 configs
-# ============================================
-make diss TESTCASE=matmul TYPE=HIF4_HIF4 VER=MX_NOGATHER_REUSEA M=256 N=2048 K=2048 tM=32 tN=64 tK=1024
-make diss TESTCASE=matmul TYPE=HIF4_HIF4 VER=MX_NOGATHER_REUSEA M=256 N=1280 K=2048 tM=32 tN=64 tK=1024
+if mm_reusea_gate_ok float 256 128; then
+make diss TESTCASE=matmul_reuseA \
+    COMPILER_DIR="$COMPILER_DIR" \
+    DTYPE=float B=1 M=256 N=256 K=256 \
+    tM=128 tN=256 tK=128
+fi
 
-# ============================================
-# A16W4: BF16 x FP4 mixed precision - 3 configs
-# ============================================
-make diss TESTCASE=matmul TYPE=A16W4 M=256 N=2048 K=2048 tM=16 tN=16 tK=128
-make diss TESTCASE=matmul TYPE=A16W4 M=512 N=1280 K=2048 tM=16 tN=16 tK=128
-make diss TESTCASE=matmul TYPE=A16W4 M=512 N=512 K=4096 tM=16 tN=16 tK=128
+# BF16/FP16 inputs use twice the FP32 K tile extent.
+make diss TESTCASE=matmul_shared COMPILER_DIR="$COMPILER_DIR" \
+    DTYPE=__bf16 B=1 M=256 N=256 K=256 tM=128 tN=256 tK=256
 
-# ============================================
-# MASK: Generic matmul variants - 8 configs
-# ============================================
-# FP32 variants
-make diss TESTCASE=matmul TYPE=MASK MODE=MASK_FP32 M=256 N=256 K=256 tM=32 tN=32 tK=32
-make diss TESTCASE=matmul TYPE=MASK MODE=MASK_FP32_REUSEA M=256 N=256 K=256 tM=32 tN=32 tK=32
-make diss TESTCASE=matmul TYPE=MASK MODE=MASK_FP32_REUSEB M=256 N=256 K=256 tM=32 tN=32 tK=32
-# 黄区能过，蓝区过不了
-# make TESTCASE=matmul TYPE=MASK MODE=MASK_FP32_DYNAMIC M=256 N=256 K=256 tM=32 tN=32 tK=32
+make diss TESTCASE=matmul_shared COMPILER_DIR="$COMPILER_DIR" \
+    DTYPE=__half B=1 M=256 N=256 K=256 tM=128 tN=256 tK=256
 
-# FP16 variants
-make diss TESTCASE=matmul TYPE=MASK MODE=MASK_FP16 M=256 N=256 K=256 tM=32 tN=32 tK=64
-make diss TESTCASE=matmul TYPE=MASK MODE=MASK_FP16_REUSEA M=256 N=256 K=256 tM=32 tN=32 tK=64
-make diss TESTCASE=matmul TYPE=MASK MODE=MASK_FP16_REUSEB M=256 N=256 K=256 tM=32 tN=32 tK=64
+# Low-precision SharedTile matmul. MXFP8/MXFP4 load group-32 Shared E8M0
+# scales; HIF4X2 uses Matrix-MX with one raw U32 scale word per 64 logical K
+# values. HIFP8 uses the normal TMATMUL input path.
+# FP8-family inputs use four times the FP32 K tile extent.
+for mode in FP8 HIFP8 MXFP8; do
+    make diss TESTCASE=matmul_lowp LP_MODE="$mode" \
+        COMPILER_DIR="$COMPILER_DIR" \
+        B=1 M=256 N=256 K=512 tM=128 tN=256 tK=512
+done
 
-# FP8 variants
-make diss TESTCASE=matmul TYPE=MASK MODE=MASK_FP8 M=256 N=256 K=256 tM=32 tN=32 tK=128
-make diss TESTCASE=matmul TYPE=MASK MODE=MASK_FP8_REUSEA M=256 N=256 K=256 tM=32 tN=32 tK=128
-make diss TESTCASE=matmul TYPE=MASK MODE=MASK_FP8_REUSEB M=256 N=256 K=256 tM=32 tN=32 tK=128
-# make TESTCASE=matmul TYPE=MASK MODE=MX_FP8 M=256 N=256 K=256 tM=32 tN=32 tK=64
+# FP4-family inputs use eight times the FP32 K tile extent.  Keep tM=128 but
+# reduce tN to 64 so A, B and both scale tiles fit in the SharedTReg pool;
+# N=256 is covered by four N tiles.
+for mode in HIF4X2 MXFP4; do
+    make diss TESTCASE=matmul_lowp LP_MODE="$mode" \
+        COMPILER_DIR="$COMPILER_DIR" \
+        B=1 M=256 N=256 K=1024 tM=128 tN=64 tK=1024
+done
+
+# Larger FP32 problem size (M=N=K=1024) to exercise deeper K reduction and
+# more M/N output tiles. Tile extents unchanged from the 256 baseline
+# (tM=128 tN=256 tK=128); only the outer loop counts grow.
+make diss TESTCASE=matmul_shared COMPILER_DIR="$COMPILER_DIR" \
+    DTYPE=float B=1 M=1024 N=1024 K=1024 tM=128 tN=256 tK=128
+
+if mm_reusea_gate_ok float 256 128; then
+make diss TESTCASE=matmul_reuseA COMPILER_DIR="$COMPILER_DIR" \
+    DTYPE=float B=1 M=1024 N=1024 K=1024 tM=128 tN=256 tK=128
+fi
+
+# === S1-S6 matmul_shared performance matrix ===
+# Source: matmul_shared_S1_S6_pmu_refreshed_20260921.xlsx, sheet
+# "完整对比表".  The table contains 264 shape/dtype/tile configurations:
+#   S1: 2048x256x2048   S2: 128x256x7168
+#   S3: 256x128x7168    S4: 64x128x7168
+#   S5: 64x64x7168      S6: 128x256x32768
+#
+# Every configuration in the table is represented by the grids below; no
+# capacity gate (issue #192 only excludes the two FA Tk256 FP32 cases).
+matrix_built=0
+
+compile_shared_matrix_case() {
+    local suite=$1 dtype=$2 m=$3 n=$4 k=$5 tn=$6 tk=$7
+    make diss TESTCASE=matmul_shared COMPILER_DIR="$COMPILER_DIR" \
+        DTYPE="$dtype" B=1 M="$m" N="$n" K="$k" \
+        tM=128 tN="$tn" tK="$tk"
+    matrix_built=$((matrix_built + 1))
+}
+
+compile_lowp_matrix_case() {
+    local suite=$1 mode=$2 m=$3 n=$4 k=$5 tn=$6 tk=$7
+    make diss TESTCASE=matmul_lowp LP_MODE="$mode" \
+        COMPILER_DIR="$COMPILER_DIR" \
+        B=1 M="$m" N="$n" K="$k" tM=128 tN="$tn" tK="$tk"
+    matrix_built=$((matrix_built + 1))
+}
+
+compile_shared_grid() {
+    local suite=$1 dtype=$2 m=$3 n=$4 k=$5 tn_values=$6 tk_values=$7
+    local tn tk
+    for tn in $tn_values; do
+        for tk in $tk_values; do
+            compile_shared_matrix_case "$suite" "$dtype" "$m" "$n" "$k" "$tn" "$tk"
+        done
+    done
+}
+
+compile_lowp_grid() {
+    local suite=$1 mode=$2 m=$3 n=$4 k=$5 tn_values=$6 tk_values=$7
+    local tn tk
+    for tn in $tn_values; do
+        for tk in $tk_values; do
+            compile_lowp_matrix_case "$suite" "$mode" "$m" "$n" "$k" "$tn" "$tk"
+        done
+    done
+}
+
+# FP32 table grids.
+compile_shared_grid S1 float 2048 256 2048 "64 128"     "64 128 256"
+compile_shared_grid S2 float 128  256 7168 "64 128 256" "64 128 256"
+compile_shared_grid S3 float 256  128 7168 "64 128"     "64 128 256 512"
+compile_shared_grid S4 float 64   128 7168 "64 128"     "64 128 256 512"
+compile_shared_grid S5 float 64   64  7168 "64"         "64 128 256 512"
+compile_shared_grid S6 float 128  256 32768 "64 128 256" "64 128 256"
+
+# BF16 and FP16 table grids.
+for dtype in __bf16 __half; do
+    compile_shared_grid S1 "$dtype" 2048 256 2048  "64 128 256" "64 128 256"
+    compile_shared_grid S2 "$dtype" 128  256 7168  "64 128 256" "64 128 256"
+    compile_shared_grid S3 "$dtype" 256  128 7168  "64 128"     "64 128 256 512"
+    compile_shared_grid S4 "$dtype" 64   128 7168  "64 128"     "64 128 256 512"
+    compile_shared_grid S5 "$dtype" 64   64  7168  "64"         "64 128 256 512"
+    compile_shared_grid S6 "$dtype" 128  256 32768 "64 128 256" "64 128 256"
+done
+
+# FP8/MXFP8/MXFP4 table grids. The raw grids contain every spreadsheet row.
+for mode in FP8 MXFP8 MXFP4; do
+    compile_lowp_grid S1 "$mode" 2048 256 2048  "64 128 256" "256 512 1024"
+    compile_lowp_grid S2 "$mode" 128  256 7168  "64 128 256" "256 512 1024"
+    compile_lowp_grid S3 "$mode" 256  128 7168  "64 128"     "256 512 1024"
+    compile_lowp_grid S4 "$mode" 64   128 7168  "64 128"     "256 512 1024"
+    compile_lowp_grid S5 "$mode" 64   64  7168  "64"         "256 512 1024"
+    compile_lowp_grid S6 "$mode" 128  256 32768 "64 128 256" "256 512 1024"
+done
+
+echo "S1-S6 matmul matrix: BUILT=$matrix_built"
+
+# === Fused matmul -> level-1 HiF4 (S1P2 data + E6M2 scale) ===
+# Per row, every 64 C columns share one E6M2 scale. The two scaled 32-column
+# halves are packed with TileArray/TASSEMBLY before BF16 -> HiF4X2 TCVT.
+make diss TESTCASE=matmul_hif4_l1_quantize \
+    COMPILER_DIR="$COMPILER_DIR" \
+    DTYPE=float B=1 M=128 N=64 K=256 tM=128 tN=64 tK=128

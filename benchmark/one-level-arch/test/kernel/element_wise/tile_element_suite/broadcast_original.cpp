@@ -1,9 +1,9 @@
 #include <common/pto_tileop.hpp>
 #include "benchmark.h"
 #ifdef BROADCAST_INLINE_I32
-#include "single_thread/broadcast/broadcast_inline.hpp"
+#include "basic_op/broadcast/broadcast_inline.hpp"
 #else
-#include "single_thread/broadcast/broadcast.hpp"
+#include "basic_op/broadcast/detail/broadcast.hpp"
 #endif
 #include <cstddef>
 #include <cstdint>

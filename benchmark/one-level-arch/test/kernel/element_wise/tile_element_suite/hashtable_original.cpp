@@ -1,4 +1,4 @@
-#include "single_thread/control/hashtable_lookup_simd.hpp"
+#include "basic_op/control/hashtable_lookup_simd.hpp"
 #include "benchmark.h"
 
 #ifndef HASHTABLE_COLUMNS

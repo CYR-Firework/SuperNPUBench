@@ -7,7 +7,7 @@
 
 #include "benchmark.h"
 #include "linx_print.h"
-#include "single_thread/deepseek/moe/group_count_aux_fi.hpp"
+#include "basic_op/group_count/group_count_aux_fi.hpp"
 
 #include <cstddef>
 #include <cstdint>

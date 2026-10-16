@@ -41,14 +41,16 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 ONE_LEVEL_ROOT = SCRIPT_DIR.parents[3]
 COMPARE_ROOT = ONE_LEVEL_ROOT / "compare"
 
-DEFAULT_GFRUN = "/home/j00833640/v300/SuperScalarModel/bin/gfrun"
-DEFAULT_GFRUN_ARGS = "-t 1 -f"
+DEFAULT_GFRUN = "/home/jtt/v300/SuperScalarModel/bin/gfrun"
+DEFAULT_GFRUN_ARGS = "-t 1 -s softcore.multiThreadNum=4 -f"
 
 # fp4 accumulates in fp32; expect near-perfect matches modulo fp4 quant noise.
 DEFAULT_ATOL = 2e-2
 DEFAULT_RTOL = 2e-2
 
-MX_BLOCK = 32  # smatrix_wfactor: scale group size
+MX_BLOCK = 16  # carrier scale group (32 logical / PackedFactor=2)
+PACKED_FACTOR = 2  # __fp4_e2m1x2: 2 logical elements per carrier byte
+MX_BLOCK_LOGICAL = 32  # MX scale group: 32 logical K elements per E8M0 byte
 
 # fp4_e2m1x2 code -> float32
 _FP4 = np.array([
@@ -106,6 +108,9 @@ def parse_shape(elf):
     shape = {k: int(v) for k, v in m.groupdict().items()}
     shape["Kv"] = shape["K"] // 2  # fp4 packed carriers (= K logical / 2)
     shape["name"] = name
+    # Multi-thread (4-PE cooperative) testcases use B layout [N, Kv] (TransB=0).
+    # Single-PE testcases use B layout [Kv, N] (TransB=1).
+    shape["multi_thread"] = "_mt" in name or "_hif4" in name
     return shape
 
 
@@ -113,7 +118,8 @@ def prepare_case(elf, shape, args):
     case_dir = COMPARE_ROOT / shape["name"]
     case_dir.mkdir(parents=True, exist_ok=True)
     M, N, K = shape["M"], shape["N"], shape["K"]
-    Kv, Kb = shape["Kv"], K // MX_BLOCK
+    Kv, Kb = shape["Kv"], K // MX_BLOCK_LOGICAL  # scale blocks in logical K
+    multi_thread = shape.get("multi_thread", False)
 
     rng = np.random.default_rng(args.seed)
     if args.ones:
@@ -130,29 +136,48 @@ def prepare_case(elf, shape, args):
     for m in range(M):
         row = A_f32[m]
         for kb in range(Kb):
-            block = row[kb * MX_BLOCK : (kb + 1) * MX_BLOCK]
+            block = row[kb * MX_BLOCK_LOGICAL : (kb + 1) * MX_BLOCK_LOGICAL]
             mx = np.max(np.abs(block))
             A_scales[m, kb] = 0 if mx < 1e-8 else _e8m0_encode(np.array([6.0 / mx]))[0]
             sv = float(_e8m0_decode(np.array([A_scales[m, kb]]))[0])
             q = block / sv
             codes = _quant_fp4(q)
-            h = (kb + 1) * MX_BLOCK // 2
-            A_packed[m, kb * (MX_BLOCK // 2) : h] = _pack_row(codes[0::2], codes[1::2])
+            h = (kb + 1) * MX_BLOCK_LOGICAL // 2
+            A_packed[m, kb * (MX_BLOCK_LOGICAL // 2) : h] = _pack_row(codes[0::2], codes[1::2])
 
-    B_packed = np.zeros((Kv, N), dtype=np.uint8)
-    B_scales = np.zeros((Kb, N), dtype=np.uint8)
-    for kb in range(Kb):
-        bs = slice(kb * MX_BLOCK, (kb + 1) * MX_BLOCK)
-        for n in range(N):
-            block = B_f32[bs, n]
-            mx = np.max(np.abs(block))
-            B_scales[kb, n] = 0 if mx < 1e-8 else _e8m0_encode(np.array([6.0 / mx]))[0]
-            sv = float(_e8m0_decode(np.array([B_scales[kb, n]]))[0])
-            q = block / sv
-            codes = _quant_fp4(q)
-            for kk in range(MX_BLOCK // 2):
-                k = kb * MX_BLOCK + kk * 2
-                B_packed[k // 2, n] = (codes[kk * 2] & 0xF) | ((codes[kk * 2 + 1] & 0xF) << 4)
+    # B layout depends on testcase: MT uses [N, Kv] (TransB=0), single-PE uses [Kv, N] (TransB=1).
+    if multi_thread:
+        # B stored as [N, Kv] row-major (PTO spec #257 TransB=0: [N, K]).
+        B_packed = np.zeros((N, Kv), dtype=np.uint8)
+        B_scales = np.zeros((N, Kb), dtype=np.uint8)
+        for kb in range(Kb):
+            bs = slice(kb * MX_BLOCK_LOGICAL, (kb + 1) * MX_BLOCK_LOGICAL)
+            for n in range(N):
+                block = B_f32[bs, n]
+                mx = np.max(np.abs(block))
+                B_scales[n, kb] = 0 if mx < 1e-8 else _e8m0_encode(np.array([6.0 / mx]))[0]
+                sv = float(_e8m0_decode(np.array([B_scales[n, kb]]))[0])
+                q = block / sv
+                codes = _quant_fp4(q)
+                for kk in range(MX_BLOCK_LOGICAL // 2):
+                    k = kb * MX_BLOCK_LOGICAL + kk * 2
+                    B_packed[n, k // 2] = (codes[kk * 2] & 0xF) | ((codes[kk * 2 + 1] & 0xF) << 4)
+    else:
+        # Single-PE: B stored as [Kv, N] (TransB=1).
+        B_packed = np.zeros((Kv, N), dtype=np.uint8)
+        B_scales = np.zeros((Kb, N), dtype=np.uint8)
+        for kb in range(Kb):
+            bs = slice(kb * MX_BLOCK_LOGICAL, (kb + 1) * MX_BLOCK_LOGICAL)
+            for n in range(N):
+                block = B_f32[bs, n]
+                mx = np.max(np.abs(block))
+                B_scales[kb, n] = 0 if mx < 1e-8 else _e8m0_encode(np.array([6.0 / mx]))[0]
+                sv = float(_e8m0_decode(np.array([B_scales[kb, n]]))[0])
+                q = block / sv
+                codes = _quant_fp4(q)
+                for kk in range(MX_BLOCK_LOGICAL // 2):
+                    k = kb * MX_BLOCK_LOGICAL + kk * 2
+                    B_packed[k // 2, n] = (codes[kk * 2] & 0xF) | ((codes[kk * 2 + 1] & 0xF) << 4)
 
     A_packed.tofile(case_dir / "src0.bin")
     B_packed.tofile(case_dir / "src1.bin")
@@ -164,16 +189,24 @@ def prepare_case(elf, shape, args):
         f32_row = _unpack_row(A_packed[m])
         A_dec[m] = f32_row
         for kb in range(Kb):
-            sl = slice(kb * MX_BLOCK, (kb + 1) * MX_BLOCK)
+            sl = slice(kb * MX_BLOCK_LOGICAL, (kb + 1) * MX_BLOCK_LOGICAL)
             A_dec[m, sl] *= float(_e8m0_decode(np.array([A_scales[m, kb]]))[0])
 
     B_dec = np.zeros((K, N), dtype=np.float32)
-    for n in range(N):
-        for k in range(K):
-            packed = int(B_packed[k // 2, n])
-            code = (packed & 0xF) if (k % 2 == 0) else ((packed >> 4) & 0xF)
-            B_dec[k, n] = _FP4[code] * float(
-                _e8m0_decode(np.array([B_scales[k // MX_BLOCK, n]]))[0])
+    if multi_thread:
+        for n in range(N):
+            for k in range(K):
+                packed = int(B_packed[n, k // 2])
+                code = (packed & 0xF) if (k % 2 == 0) else ((packed >> 4) & 0xF)
+                B_dec[k, n] = _FP4[code] * float(
+                    _e8m0_decode(np.array([B_scales[n, k // MX_BLOCK_LOGICAL]]))[0])
+    else:
+        for n in range(N):
+            for k in range(K):
+                packed = int(B_packed[k // 2, n])
+                code = (packed & 0xF) if (k % 2 == 0) else ((packed >> 4) & 0xF)
+                B_dec[k, n] = _FP4[code] * float(
+                    _e8m0_decode(np.array([B_scales[k // MX_BLOCK_LOGICAL, n]]))[0])
 
     golden = A_dec @ B_dec
     golden.astype(np.float32).tofile(case_dir / "golden.bin")

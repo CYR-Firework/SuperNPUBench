@@ -16,7 +16,7 @@ def validate(source: str) -> None:
 
 def main() -> None:
     kernel = (Path(__file__).resolve().parents[4]
-              / "kernels/single_thread/sort/element_atomic_topk.hpp")
+              / "kernels/basic_op/topk/element_atomic_topk.hpp")
     source = kernel.read_text(encoding="utf-8")
     validate(source)
     mutations = [source + f"\n{opcode}(values, view, 0);"

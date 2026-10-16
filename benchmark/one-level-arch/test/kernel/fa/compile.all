@@ -1,43 +1,120 @@
 #!/bin/bash
-# Flash Attention operator test cases
+# Multi-thread GMMA FlashAttention precision variants.
 
-set -euo pipefail
+# No set -e: HIF4_VECBF16 and some modes fail to compile (shared fp4+shared fp4
+# not accepted by matrix_input_pair_legal); the script must continue to compile
+# subsequent shape groups (fixpipe, long-context).
 : "${COMPILER_DIR:?Set COMPILER_DIR to the Linx compiler bin directory}"
 
-# ============================================
-# fa_2d_unroll: 2D unrolled flash attention
-# ============================================
-# X=1, Y=2
-make diss TESTCASE=fa_2d_unroll Sq=256 Skv=512 Tm=16 Tk=32 X=1 Y=2
-make diss TESTCASE=fa_2d_unroll Sq=512 Skv=512 Tm=16 Tk=32 X=1 Y=2
+# fa_gmma_dynamic uses runtime Q/KV loop bounds with single-pass online
+# softmax; Q, score, row state, and PV accumulation remain in tile registers.
 
-# X=1, Y=4
-make diss TESTCASE=fa_2d_unroll Sq=256 Skv=512 Tm=16 Tk=32 X=1 Y=4
-make diss TESTCASE=fa_2d_unroll Sq=512 Skv=512 Tm=16 Tk=32 X=1 Y=4
+# fa_gmma_kchains runs the SAME shape/mode matrix as fa_2d_unroll_gmma.
+# It uses the full Tk PV reduction dimension; the chain is carried across KV
+# blocks through the CUBE internal accumulator. X_dim/Y_dim are name-only for
+# kchains because the kernel does not stage multiple shared tiles.
 
-# X=2, Y=2
-make diss TESTCASE=fa_2d_unroll Sq=256 Skv=512 Tm=16 Tk=32 X=2 Y=2
-make diss TESTCASE=fa_2d_unroll Sq=512 Skv=512 Tm=16 Tk=32 X=2 Y=2
+# fa_lowp: MXFP4 Q/K/V, BF16 QK+softmax, then MXFP4 P/V matmul.
+# (Also Sq256/Skv256 — kept as the sole config of its kernel.)
+make diss TESTCASE=fa_lowp \
+    COMPILER_DIR="$COMPILER_DIR" \
+    FA_MODE=MXFP4_VECBF16 Sq=256 Skv=256 Tm=128 Tk=128 \
+    X_dim=1 Y_dim=2
 
-# X=2, Y=4
-make diss TESTCASE=fa_2d_unroll Sq=256 Skv=512 Tm=16 Tk=32 X=2 Y=4
-make diss TESTCASE=fa_2d_unroll Sq=512 Skv=512 Tm=16 Tk=32 X=2 Y=4
+# PMU-optimized long-context MXFP4 path. Keep the reference fa_lowp target
+# above as the functional/performance A/B baseline.
+make diss TESTCASE=fa_mxfp4_opt \
+    COMPILER_DIR="$COMPILER_DIR" \
+    FA_MODE=MXFP4_VECBF16 Sq=128 Skv=8192 Tm=128 Tk=128 \
+    X_dim=1 Y_dim=1
 
-# ============================================
-# sfa: sparse (block-sparse / local-window) flash attention
-# ============================================
-make diss TESTCASE=sfa Sq=256 Skv=512 Tm=16 Tk=32
-make diss TESTCASE=sfa Sq=512 Skv=512 Tm=16 Tk=32
+# fa_lowp_recip: TRECIP-based reciprocal path (FA_LOWP_RECIP=1), two shapes
+# (baseline + long context). Built from its own TU (src/fa_lowp_recip.cpp)
+# so it never reuses a fa_lowp.o compiled without the define (make ignores
+# -D flag changes).
+make diss TESTCASE=fa_lowp_recip \
+    COMPILER_DIR="$COMPILER_DIR" \
+    FA_MODE=MXFP4_VECBF16 Sq=256 Skv=256 Tm=128 Tk=128 \
+    X_dim=1 Y_dim=2
 
-# ============================================
-# fa_softmax_pto: PTO softmax flash attention
-# ============================================
-make diss TESTCASE=fa_softmax_pto Sq=256 Skv=512 Tm=16 Tk=32
-make diss TESTCASE=fa_softmax_pto Sq=512 Skv=512 Tm=16 Tk=32
+# fa_lowp_algC_final: the finalized algC lowp variant (MXFP4 matrix +
+# BF16 vector). Full shape set mirroring the other fa testcases, all X1/Y1.
+for cfg in "256 256 128" "1024 1024 128" "128 8192 128" "256 512 256"; do
+    set -- $cfg
+    make diss TESTCASE=fa_lowp_algC_final \
+        COMPILER_DIR="$COMPILER_DIR" \
+        FA_MODE=MXFP4_VECBF16 Sq="$1" Skv="$2" Tm=128 Tk="$3" \
+        X_dim=1 Y_dim=1
+done
 
-# ============================================
-# fa_HIF4_HIF4: HIF4 quantized flash attention
-# ============================================
-make diss TESTCASE=fa_HIF4_HIF4 MODE=BF16_NOGATHER Sq=256 Skv=512 Tm=16 Tk=32 X=1 Y=1
-# make TESTCASE=fa_HIF4_HIF4 MODE=BF16x2 Sq=256 Skv=512 Tm=8 Tk=32 X=1 Y=1
-# make TESTCASE=fa_HIF4_HIF4 MODE=BF16x2_NOGATHER Sq=256 Skv=512 Tm=8 Tk=32 X=1 Y=1
+make diss TESTCASE=fa_lowp_recip \
+    COMPILER_DIR="$COMPILER_DIR" \
+    FA_MODE=MXFP4_VECBF16 Sq=128 Skv=8192 Tm=128 Tk=128 \
+    X_dim=1 Y_dim=2
+
+# Larger sequence length (Sq=Skv=1024) to exercise deeper Q-block and K/V-block
+# loops. Tile extents unchanged from the multi-tile baseline (Tm=128 Tk=128,
+# X_dim=1 Y_dim=2); only the outer iteration counts grow.
+for testcase in fa_2d_unroll_gmma fa_fixpipe fa_gmma_kchains; do
+    for mode in \
+        FP32_VECFP32 \
+        BF16_VECFP32 \
+        MXFP8_VECFP32 \
+        HIF8_VECFP32 \
+        FP8_VECFP32 \
+        FP8_VECBF16 \
+        MXFP4_VECBF16 \
+        HIF4_VECBF16; do
+        make diss TESTCASE="$testcase" \
+            COMPILER_DIR="$COMPILER_DIR" \
+            FA_MODE="$mode" Sq=1024 Skv=1024 Tm=128 Tk=128 \
+            X_dim=1 Y_dim=2
+    done
+done
+
+# Long context (small Q, large KV): Sq=128 Skv=8192 exercises a deep K/V-block
+# loop with a single Q-block (Qb = Sq/kGroupM = 128/128 = 1). Tile extents
+# Tm=128 Tk=128, two K/V tiles staged (Y_dim=2), default head dims QD=VD=128.
+for testcase in fa_2d_unroll_gmma fa_fixpipe fa_gmma_kchains; do
+    for mode in \
+        FP32_VECFP32 \
+        BF16_VECFP32 \
+        MXFP8_VECFP32 \
+        HIF8_VECFP32 \
+        FP8_VECFP32 \
+        FP8_VECBF16 \
+        MXFP4_VECBF16 \
+        HIF4_VECBF16; do
+        make diss TESTCASE="$testcase" \
+            COMPILER_DIR="$COMPILER_DIR" \
+            FA_MODE="$mode" Sq=128 Skv=8192 Tm=128 Tk=128 \
+            X_dim=1 Y_dim=2
+    done
+done
+
+# Variable Tk (tile-K): Tk=256 halves the K/V-block loop. Y_dim=1 and Skv=512
+# keep at least two K/V blocks.
+for testcase in fa_2d_unroll_gmma fa_fixpipe fa_gmma_kchains; do
+    for mode in \
+        FP32_VECFP32 \
+        BF16_VECFP32 \
+        MXFP8_VECFP32 \
+        HIF8_VECFP32 \
+        FP8_VECFP32 \
+        FP8_VECBF16 \
+        MXFP4_VECBF16 \
+        HIF4_VECBF16; do
+        # issue #192: the Sq256/Skv512/Tk256 CubeFP32 variants of 2d_unroll
+        # and kchains deadlock on the 256 KiB shareTReg pool (full-pool
+        # footprint + generational overlap) and are excluded; fixpipe's
+        # Tk256 FP32 variant is unaffected and stays.
+        if [ "$mode" = "FP32_VECFP32" ] && [ "$testcase" != "fa_fixpipe" ]; then
+            echo "SKIP (issue #192): $testcase Tk=256 FP32"
+            continue
+        fi
+        make diss TESTCASE="$testcase" \
+            COMPILER_DIR="$COMPILER_DIR" \
+            FA_MODE="$mode" Sq=256 Skv=512 Tm=128 Tk=256 \
+            X_dim=1 Y_dim=1
+    done
+done

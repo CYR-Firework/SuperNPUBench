@@ -1,7 +1,7 @@
 #include <common/pto_tileop.hpp>
 #include "benchmark.h"
 #include "linx_print.h"
-#include "single_thread/concat/concat_scatter.hpp"
+#include "basic_op/concat/detail/concat_scatter.hpp"
 #include <cstddef>
 #include <cstdint>
 

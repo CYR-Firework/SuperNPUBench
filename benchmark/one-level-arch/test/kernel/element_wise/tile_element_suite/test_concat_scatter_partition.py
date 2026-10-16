@@ -16,14 +16,16 @@ class ConcatScatterPartitionTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix='pto-concat-partition-') as temp:
             temp = Path(temp)
             (temp / 'common').mkdir()
-            (temp / 'single_thread/concat').mkdir(parents=True)
+            (temp / 'basic_op/concat/detail').mkdir(parents=True)
+            (temp / 'basic_op/concat/concat_scatter.hpp').write_text(
+                (kernels / 'basic_op/concat/concat_scatter.hpp').read_text())
             (temp / 'common/pto_tileop.hpp').write_text('''#pragma once
 #include <cstdint>
 struct __half {};
 inline uint32_t current_pe;
 inline uint32_t get_thread_idx() { return current_pe; }
 ''')
-            (temp / 'single_thread/concat/concat_scatter.hpp').write_text('''#pragma once
+            (temp / 'basic_op/concat/detail/concat_scatter.hpp').write_text('''#pragma once
 #include <cstddef>
 #include <cstdint>
 inline unsigned seen_capacity, seen_offset, seen_count;
@@ -35,7 +37,7 @@ void concat_scatter(T*, T*, size_t*, size_t*, uint32_t offset,
 ''')
             source = temp / 'test.cpp'
             source.write_text('''#include <cassert>
-#include "multi_thread/concat/concat_scatter.hpp"
+#include "basic_op/concat/concat_scatter.hpp"
 template<class T, int TM, size_t Rank, size_t Dim, int Output, bool Migrated>
 void check() {
     T input[4096], output[Output];
