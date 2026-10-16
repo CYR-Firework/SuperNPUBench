@@ -5,7 +5,7 @@
   "entries": [
     {
       "id": "gather",
-      "source": "benchmark/one-level-arch/kernels/single_thread/gather/gather.hpp",
+      "source": "benchmark/one-level-arch/kernels/basic_op/gather/detail/gather.hpp",
       "access_kind": "indexed_gm_load",
       "status": "pending",
       "requirements": [
@@ -64,11 +64,12 @@
           "source_status": "active",
           "migration_status": "pending"
         }
-      ]
+      ],
+      "original_source": "benchmark/one-level-arch/kernels/single_thread/gather/gather.hpp"
     },
     {
       "id": "concat_gather",
-      "source": "benchmark/one-level-arch/kernels/single_thread/concat/concat_gather.hpp",
+      "source": "benchmark/one-level-arch/kernels/basic_op/concat/detail/concat_gather.hpp",
       "access_kind": "indexed_gm_load",
       "status": "verified_functional_profile",
       "requirements": [
@@ -202,11 +203,12 @@
       "timing_status": "pending_separate_pr",
       "remaining_profiles": [
         "multi-thread wrapper"
-      ]
+      ],
+      "original_source": "benchmark/one-level-arch/kernels/single_thread/concat/concat_gather.hpp"
     },
     {
       "id": "concat_scatter",
-      "source": "benchmark/one-level-arch/kernels/single_thread/concat/concat_scatter.hpp",
+      "source": "benchmark/one-level-arch/kernels/basic_op/concat/detail/concat_scatter.hpp",
       "access_kind": "indexed_gm_store",
       "status": "pending",
       "requirements": [
@@ -255,11 +257,12 @@
           "concat_dim": 1,
           "migration_status": "pending"
         }
-      ]
+      ],
+      "original_source": "benchmark/one-level-arch/kernels/single_thread/concat/concat_scatter.hpp"
     },
     {
       "id": "broadcast",
-      "source": "benchmark/one-level-arch/kernels/single_thread/broadcast/broadcast.hpp",
+      "source": "benchmark/one-level-arch/kernels/basic_op/broadcast/detail/broadcast.hpp",
       "access_kind": "affine_indexed_load",
       "status": "pending",
       "requirements": [
@@ -271,11 +274,12 @@
         "same_elf_gfrun",
         "zero_model_invariants"
       ],
-      "evidence": null
+      "evidence": null,
+      "original_source": "benchmark/one-level-arch/kernels/single_thread/broadcast/broadcast.hpp"
     },
     {
       "id": "broadcast_inline",
-      "source": "benchmark/one-level-arch/kernels/single_thread/broadcast/broadcast_inline.hpp",
+      "source": "benchmark/one-level-arch/kernels/basic_op/broadcast/broadcast_inline.hpp",
       "access_kind": "affine_indexed_load",
       "status": "pending",
       "requirements": [
@@ -287,11 +291,12 @@
         "same_elf_gfrun",
         "zero_model_invariants"
       ],
-      "evidence": null
+      "evidence": null,
+      "original_source": "benchmark/one-level-arch/kernels/single_thread/broadcast/broadcast_inline.hpp"
     },
     {
       "id": "transpose",
-      "source": "benchmark/one-level-arch/kernels/single_thread/transpose/transpose.hpp",
+      "source": "benchmark/one-level-arch/kernels/basic_op/transpose/detail/transpose.hpp",
       "access_kind": "permuted_indexed_load",
       "status": "pending",
       "requirements": [
@@ -303,11 +308,12 @@
         "same_elf_gfrun",
         "zero_model_invariants"
       ],
-      "evidence": null
+      "evidence": null,
+      "original_source": "benchmark/one-level-arch/kernels/single_thread/transpose/transpose.hpp"
     },
     {
       "id": "hashtable_lookup_simd",
-      "source": "benchmark/one-level-arch/kernels/single_thread/control/hashtable_lookup_simd.hpp",
+      "source": "benchmark/one-level-arch/kernels/basic_op/control/hashtable_lookup_simd.hpp",
       "access_kind": "data_dependent_probe",
       "status": "pending",
       "requirements": [
@@ -319,11 +325,12 @@
         "same_elf_gfrun",
         "zero_model_invariants"
       ],
-      "evidence": null
+      "evidence": null,
+      "original_source": "benchmark/one-level-arch/kernels/single_thread/control/hashtable_lookup_simd.hpp"
     },
     {
       "id": "group_count_aux_fi",
-      "source": "benchmark/one-level-arch/kernels/single_thread/deepseek/moe/group_count_aux_fi.hpp",
+      "source": "benchmark/one-level-arch/kernels/basic_op/group_count/group_count_aux_fi.hpp",
       "access_kind": "histogram_reduction",
       "status": "verified_functional_profile",
       "requirements": [
@@ -382,11 +389,12 @@
         "used_elements": 128,
         "output_elements": 64,
         "bins": 32
-      }
+      },
+      "original_source": "benchmark/one-level-arch/kernels/single_thread/deepseek/moe/group_count_aux_fi.hpp"
     },
     {
       "id": "matmul_mx_scale_access",
-      "source": "benchmark/one-level-arch/kernels/single_thread/matmul/matmul_mx.hpp",
+      "source": "benchmark/one-level-arch/kernels/basic_op/matmul/matmul_mx.hpp",
       "access_kind": "indexed_scale_rearrangement",
       "status": "pending",
       "requirements": [
@@ -398,7 +406,8 @@
         "same_elf_gfrun",
         "zero_model_invariants"
       ],
-      "evidence": null
+      "evidence": null,
+      "original_source": "benchmark/one-level-arch/kernels/single_thread/matmul/matmul_mx.hpp"
     },
     {
       "id": "gather_v2",
@@ -498,7 +507,7 @@
     },
     {
       "id": "element_atomic_topk",
-      "source": "benchmark/one-level-arch/kernels/single_thread/sort/element_atomic_topk.hpp",
+      "source": "benchmark/one-level-arch/kernels/basic_op/topk/element_atomic_topk.hpp",
       "access_kind": "atomic_histogram_topk",
       "status": "verified_profile",
       "requirements": [
@@ -549,7 +558,8 @@
       "closure_scope": "Only the recorded source/configurations; does not close other inventory entries or multithread wrappers.",
       "deferred_requirements": [
         "same_elf_gfsim"
-      ]
+      ],
+      "original_source": "benchmark/one-level-arch/kernels/single_thread/sort/element_atomic_topk.hpp"
     },
     {
       "id": "histogram_tile_element",
@@ -849,10 +859,10 @@
     }
   ],
   "multi_thread_wrappers": [
-    "benchmark/one-level-arch/kernels/multi_thread/broadcast/broadcast.hpp",
-    "benchmark/one-level-arch/kernels/multi_thread/concat/concat_gather.hpp",
-    "benchmark/one-level-arch/kernels/multi_thread/concat/concat_scatter.hpp",
-    "benchmark/one-level-arch/kernels/multi_thread/gather/gather.hpp"
+    "benchmark/one-level-arch/kernels/basic_op/broadcast/broadcast.hpp",
+    "benchmark/one-level-arch/kernels/basic_op/concat/concat_gather.hpp",
+    "benchmark/one-level-arch/kernels/basic_op/concat/concat_scatter.hpp",
+    "benchmark/one-level-arch/kernels/basic_op/gather/gather.hpp"
   ],
   "raw_conformance_companions": [
     "mgather",
@@ -1416,5 +1426,11 @@
     "Reference-backed Tile parameter promotion and alias proofs are not covered by local-carrier support; two existing positive frontend tests still reject at O2.",
     "O0 marked regions remain explicitly rejected; old negative fixtures must be revised to reach their intended per-effect legality checks.",
     "Remaining original application configurations and all4 multithread wrappers require their own complete gfrun memory evidence."
+  ],
+  "original_multi_thread_wrappers": [
+    "benchmark/one-level-arch/kernels/multi_thread/broadcast/broadcast.hpp",
+    "benchmark/one-level-arch/kernels/multi_thread/concat/concat_gather.hpp",
+    "benchmark/one-level-arch/kernels/multi_thread/concat/concat_scatter.hpp",
+    "benchmark/one-level-arch/kernels/multi_thread/gather/gather.hpp"
   ]
 }

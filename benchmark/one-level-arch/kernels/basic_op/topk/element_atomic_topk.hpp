@@ -39,13 +39,26 @@ inline TopKResult topk16(const uint32_t *input, std::size_t count,
                         TopKWorkspace workspace) {
   const std::size_t k = requested_k < count ? requested_k : count;
   const std::size_t padded_count = ((count + 127) / 128) * 128;
-  for (std::size_t bin = 0; bin < 256; ++bin) {
-    workspace.high_hist[bin] = 0;
-    workspace.low_hist[bin] = 0;
+  // 初始化同样通过元素循环写回原有缓冲；每个 region 只有一个写流。
+  for (uint32_t begin = 0; begin < 256; begin += kPartElements) {
+    auto *high = workspace.high_hist + begin;
+    auto *low = workspace.low_hist + begin;
+#pragma pto element for
+    for (uint32_t element = 0; element < kPartElements; ++element)
+      high[element] = 0;
+#pragma pto element for
+    for (uint32_t element = 0; element < kPartElements; ++element)
+      low[element] = 0;
   }
-  for (std::size_t element = 0; element < padded_count; ++element) {
-    workspace.old_high[element] = 0;
-    workspace.old_low[element] = 0;
+  for (std::size_t begin = 0; begin < padded_count; begin += kPartElements) {
+    auto *high = workspace.old_high + begin;
+    auto *low = workspace.old_low + begin;
+#pragma pto element for
+    for (uint32_t element = 0; element < kPartElements; ++element)
+      high[element] = 0;
+#pragma pto element for
+    for (uint32_t element = 0; element < kPartElements; ++element)
+      low[element] = 0;
   }
 
   // 第一轮：统计所有元素的高 8 位。
@@ -80,6 +93,7 @@ inline TopKResult topk16(const uint32_t *input, std::size_t count,
   if (k == 0)
     return {0, UINT16_MAX, 255, 0, 0};
 
+  // 分位扫描和后面的紧凑收集含有跨元素依赖，按普通 C++ 顺序执行。
   std::size_t remaining = k;
   uint32_t selected_high = 255;
   for (int bin = 255; bin >= 0; --bin) {

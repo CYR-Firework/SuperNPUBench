@@ -415,19 +415,23 @@ void qli_topk_radix(float* scores_gm, int32_t* indices_gm) {
         // ---- Step 2: 4 轮 MSD radix → kth_value ----
         RU kth_value = 0;
         int remaining = topK;
-        for (int w = 0; w < 32; w++) prefix_buf[w] = 0;
+#pragma pto element for
+        for (uint32_t element = 0; element < 32; ++element)
+            prefix_buf[element] = 0;
 
         for (int r = 3; r >= 0; r--) {
             RU per_bin[256] = {0};
             // 前缀: 已定高位字节（ByteId<3 时生效）
             if (r < 3) {
-                volatile RU* pb = reinterpret_cast<volatile RU*>(prefix_buf);
-                RU b3 = (kth_value >> 24) & 0xFFu;
-                RU b2 = (kth_value >> 16) & 0xFFu;
-                RU b1 = (kth_value >> 8) & 0xFFu;
-                for (int cc = 0; cc < 8; cc++) {
-                    pb[0*8+cc] = b3; pb[1*8+cc] = b2;
-                    pb[2*8+cc] = b1; pb[3*8+cc] = 0;
+                const RU b3 = (kth_value >> 24) & 0xFFu;
+                const RU b2 = (kth_value >> 16) & 0xFFu;
+                const RU b1 = (kth_value >> 8) & 0xFFu;
+                // PE 私有前缀缓冲；下一次 histogram 调用按语句顺序读取。
+#pragma pto element for
+                for (uint32_t element = 0; element < 32; ++element) {
+                    prefix_buf[element] = element < 8 ? b3 :
+                                          element < 16 ? b2 :
+                                          element < 24 ? b1 : 0u;
                 }
             }
             // 逐 chunk 原子直方图 + 差分合并

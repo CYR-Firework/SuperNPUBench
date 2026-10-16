@@ -45,15 +45,9 @@ using itSk_t = global_iterator<global_tensor<float, RowMajor<1, MaxSkv>>, tileSk
 using itOut_t = itSk_t;
 
 // ========== Step 1-6: 动态 shape + 多 PE ==========
-// 单 PE（numPEs==1）：local CUBE tile（CubeTileM16/N8 + TLOAD_CUBE），
-//   TMATMUL 输出 CubeAccumulatorM16 → TSTORE_CUBE 桥接回 Vec tile 继续链
-// 多 PE（numPEs>1）：cooperative SharedMatrix（GM→Shared 直载
-//   TLOAD<Matrix,1>，kGroupM=16、kPeM=16），TMATMUL 每 PE 得 CUBE [16,32]
-//   私有切片 → TSTORE_CUBE 桥接回 Vec。
-// 约束：Sq % numPEs == 0（各 PE 迭代次数一致，保证集体指令同步）。
-
-// PTO v0.58.4 CUBE cell-layout：A=SharedMatrixLeft、B=SharedMatrixRight、
-// D=CubeAccumulatorM16（kTm=16 → kGroupM=16、kPeM=16），TSTORE_CUBE 桥接回 Vec。
+// 每个 PE 使用私有 local CUBE tile（M16/N8）和 accumulator；
+// TSTORE_CUBE 桥接回 Vec，随后交替执行 element 循环与 Tile reduction。
+// 查询行按 i=tid; i<Sq; i+=numPEs 分配，支持不均匀分配，无需集体同步。
 template <typename dtype>
 inline void qli_pto_dynamic(float* scores_ptr, dtype* q_ptr, dtype* k_ptr,
                             float* wb_ptr, float* scale_k_ptr,
@@ -345,18 +339,22 @@ inline void qli_topk_radix_dynamic(float* scores_gm, int32_t* indices_gm,
         // Step 2: 4 轮 MSD radix → kth_value
         RU kth_value = 0;
         int remaining = topK;
-        for (int w = 0; w < 32; w++) prefix_buf[w] = 0;
+#pragma pto element for
+        for (uint32_t element = 0; element < 32; ++element)
+            prefix_buf[element] = 0;
 
         for (int r = 3; r >= 0; r--) {
             RU per_bin[256] = {0};
             if (r < 3) {
-                volatile RU* pb = (volatile RU*)prefix_buf;
-                RU b3 = (kth_value >> 24) & 0xFFu;
-                RU b2 = (kth_value >> 16) & 0xFFu;
-                RU b1 = (kth_value >> 8) & 0xFFu;
-                for (int cc = 0; cc < 8; cc++) {
-                    pb[0*8+cc] = b3; pb[1*8+cc] = b2;
-                    pb[2*8+cc] = b1; pb[3*8+cc] = 0;
+                const RU b3 = (kth_value >> 24) & 0xFFu;
+                const RU b2 = (kth_value >> 16) & 0xFFu;
+                const RU b1 = (kth_value >> 8) & 0xFFu;
+                // PE 私有前缀缓冲；下一次 histogram 调用按语句顺序读取。
+#pragma pto element for
+                for (uint32_t element = 0; element < 32; ++element) {
+                    prefix_buf[element] = element < 8 ? b3 :
+                                          element < 16 ? b2 :
+                                          element < 24 ? b1 : 0u;
                 }
             }
             for (int c = 0; c < NumChunks; c++) {

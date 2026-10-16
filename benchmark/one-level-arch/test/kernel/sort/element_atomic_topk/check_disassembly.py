@@ -301,6 +301,20 @@ def atomic_segments(text: str) -> list[list[Instruction]]:
 
 
 def validate(text: str) -> None:
+    instructions = parse(text)
+    stores = [index for index, inst in enumerate(instructions)
+              if inst.mnemonic == "BSTART.TLSU" and "MSCATTER" in inst.operands]
+    if len(stores) != 4:
+        raise CheckError(f"expected four native initialization stores, found {len(stores)}")
+    for start in stores:
+        end = next((index for index in range(start + 1, len(instructions))
+                    if "BSTART" in instructions[index].mnemonic), len(instructions))
+        bundle = instructions[start:end]
+        binders = [inst for inst in bundle if inst.mnemonic == "B.IOR"]
+        if "U32" not in instructions[start].operands or len(binders) != 1 or \
+                not binders[0].raw & (1 << 26) or \
+                "ExecMaskPresent" not in binders[0].operands:
+            raise CheckError("initialization store lacks native U32 execution mask")
     segments = atomic_segments(text)
     if len(segments) != 3:
         raise CheckError(f"expected exactly three histogram atomic sites, found {len(segments)}")
@@ -324,15 +338,27 @@ def validate_ir(text: str) -> None:
     )
     if len(atomics) != 3:
         raise CheckError(f"expected three masked atomic intrinsics, found {len(atomics)}")
-    tleas = re.findall(
-        r"call <32 x i64> @llvm\.linx\.experimental\.ew\.tlea[^\n]*"
-        r"i64 32\)",
-        text,
-    )
-    if len(tleas) != 3:
-        raise CheckError(f"expected three B32 TLEA intrinsics, found {len(tleas)}")
-    if any("i64 25" not in call for call in tleas):
-        raise CheckError("Top-K histogram index lost its U32 descriptor")
+    # SSA names are local to a function. Prove each memory site's own offset
+    # producer rather than counting TLEAs elsewhere in the module.
+    stores = 0
+    for function in re.findall(r"^define\b.*?^\}", text, re.MULTILINE | re.DOTALL):
+        offsets = set(re.findall(
+            r"^\s*(%[\w.]+) = call <32 x i64> "
+            r"@llvm\.linx\.experimental\.ew\.tlea[^\n(]*"
+            r"\(i64 32, i64 1, i64 25, i64 29, <32 x i32> %[\w.]+, i64 32\)",
+            function, re.MULTILINE,
+        ))
+        for call in function.splitlines():
+            is_atomic = "call <32 x i32> @llvm.linx.experimental.ew.mgather.add.masked" in call
+            is_store = "call void @llvm.linx.experimental.ew.mscatter.gpr.masked" in call
+            if not (is_atomic or is_store):
+                continue
+            stores += is_store
+            offset = re.search(r"<32 x i64> (%[\w.]+),", call)
+            if offset is None or offset.group(1) not in offsets:
+                raise CheckError("Top-K memory offset lacks its B32 U32-to-B64 TLEA producer")
+    if stores != 4:
+        raise CheckError(f"expected four masked initialization stores, found {stores}")
 
 
 def expect_rejected(name: str, text: str) -> None:
@@ -367,12 +393,9 @@ def self_test(text: str) -> None:
         "missing Zero",
         text.replace(f"{datr.raw:08x}", f"{cleared:08x}", 1),
     )
-    tlea_line = next(line for line in text.splitlines() if "BSTART.TEPL" in line and "TLEA" in line)
+    tlea_line = next(inst.line for inst in first_segment
+                     if inst.mnemonic == "BSTART.TEPL" and "TLEA" in inst.operands)
     expect_rejected("extra TLEA", text.replace(tlea_line, tlea_line + "\n" + tlea_line, 1))
-    expect_rejected(
-        "unrelated mask",
-        re.sub(r"(B\.IOR\s+\[[^,]+,)[^,]+(,zero\].*ExecMaskPresent)", r"\1t#31\2", text, count=1),
-    )
     expect_rejected(
         "non-GPR compare",
         re.sub(r"(TCMPS[^\n]*->)\s*[^\s,]+", r"\1M#1", text, count=1),
@@ -390,6 +413,12 @@ def self_test(text: str) -> None:
         mask_binder = re.search(r"\[([^,]+),([^,]+),([^\]]+)\]", bior.operands)
         assert mask_binder is not None
         _base, mask, _unused = (part.strip() for part in mask_binder.groups())
+        expect_rejected(
+            f"site{ordinal}: unrelated mask",
+            text.replace(bior.line, re.sub(
+                r"(B\.IOR\s+\[[^,]+,)[^,]+(,zero\].*ExecMaskPresent)",
+                r"\1t#31\2", bior.line), 1),
+        )
 
         def overwrite_after(candidate: str, inst: Instruction, reg: str) -> str:
             writer = f"    fffe: 00000000\taddi zero, 7, ->{reg}"
@@ -425,6 +454,19 @@ def main() -> int:
         self_test(text) if args.self_test else validate(text)
         validate_ir(ir_text)
         if args.self_test:
+            first_offset = re.search(
+                r"(<32 x i64> )(%[\w.]+)(, <32 x i32>[^\n]*)", ir_text,
+            )
+            assert first_offset is not None
+            expect_ir_rejected(
+                "unrelated byte offsets",
+                ir_text[:first_offset.start(2)] + "%unrelated.offsets" +
+                ir_text[first_offset.end(2):],
+            )
+            expect_ir_rejected(
+                "wrong TLEA input descriptor",
+                re.sub(r"(ew\.tlea[^\n]*i64 1, )i64 25", r"\1i64 24", ir_text, count=1),
+            )
             expect_ir_rejected(
                 "residual scalar atomic",
                 re.sub(
