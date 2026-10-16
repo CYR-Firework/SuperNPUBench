@@ -1532,9 +1532,11 @@ def validate(text: str, case: str, ir_text: str | None = None) -> None:
         line for line in lines
         if re.search(r"\bB\.IOR\b", line) and "ExecMaskPresent" in line
     ]
-    if len(tlea) != expected_sites:
+    # TopK also clears four workspace streams through element loops.
+    expected_tleas = expected_sites + (4 if is_topk else 0)
+    if len(tlea) != expected_tleas:
         raise CheckError(
-            f"expected exactly {expected_sites} static TLEA sites, found {len(tlea)}"
+            f"expected exactly {expected_tleas} static TLEA sites, found {len(tlea)}"
         )
     if len(atomic) != expected_sites:
         raise CheckError(
@@ -1609,8 +1611,27 @@ def validate(text: str, case: str, ir_text: str | None = None) -> None:
                 r"call <32 x i64> @llvm\.linx\.experimental\.ew\.tlea[^\n]*"
                 r"i64 32\)",
                 ir_text,
-        )) != 2:
-            raise CheckError("generic Top-K migration lost its two B32 TLEA sites")
+        )) != 6:
+            raise CheckError("generic Top-K migration lost its six B32 TLEA sites")
+        stores = 0
+        for function in re.findall(r"^define\b.*?^\}", ir_text, re.MULTILINE | re.DOTALL):
+            offsets = set(re.findall(
+                r"^\s*(%[\w.]+) = call <32 x i64> "
+                r"@llvm\.linx\.experimental\.ew\.tlea[^\n(]*"
+                r"\(i64 32, i64 1, i64 25, i64 29, <32 x i32> %[\w.]+, i64 32\)",
+                function, re.MULTILINE,
+            ))
+            for call in function.splitlines():
+                is_atomic = "call <32 x i32> @llvm.linx.experimental.ew.mgather.add.masked" in call
+                is_store = "call void @llvm.linx.experimental.ew.mscatter.gpr.masked" in call
+                if not (is_atomic or is_store):
+                    continue
+                stores += is_store
+                offset = re.search(r"<32 x i64> (%[\w.]+),", call)
+                if offset is None or offset.group(1) not in offsets:
+                    raise CheckError("Top-K memory offset lacks its B32 U32-to-B64 TLEA producer")
+        if stores != 4:
+            raise CheckError("Top-K lost its four masked initialization stores")
 
 
 def rejected(name: str, text: str, case: str, ir_text: str | None = None) -> None:
@@ -1954,6 +1975,13 @@ def main() -> int:
                 print(f"{args.case}: disassembly check PASS")
                 return 0
             if is_topk:
+                rejected(
+                    "unrelated atomic byte offsets", text, args.case,
+                    re.sub(
+                        r"(ew\.mgather\.add\.masked[^\n]*<32 x i64> )%[\w.]+",
+                        r"\1%unrelated.offsets", ir_text or "", count=1,
+                    ),
+                )
                 for marker in ("region", "view"):
                     rejected(
                         f"residual element {marker} contract",
