@@ -193,15 +193,10 @@ python3 "$case_dir/element_atomic_topk/write_provenance.py" \
     > "$artifact_dir/input-provenance.log" 2>&1
 
 set +e
-"$gfrun" --pto059-execution-mask-dev \
-    -s softcore.multiThreadNum=1 \
-    --dump-force \
-    --dump-memory "$dump_range:$artifact_dir/gfrun.mem" \
-    -f "$elf" \
-    > "$artifact_dir/gfrun.log" 2>&1
+python3 "$script_dir/gfrun_dump.py" \
+    --provenance "$artifact_dir/input-provenance.json"
 gfrun_status=$?
 set -e
-printf '%s\n' "$gfrun_status" > "$artifact_dir/gfrun.exit"
 if (( gfrun_status != 0 )); then
     exit "$gfrun_status"
 fi

@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "verification"))
-from gfrun_dump import dump_specs, plan_dump
+from gfrun_dump import GFRUN_TIMEOUT_SECONDS, dump_specs, plan_dump
 
 
 IMMUTABLE_INPUT_FIELDS = (
@@ -159,6 +159,7 @@ def main() -> int:
             "api_include": str(args.api_include),
             "selected_models": selected_models,
             "pe_count": args.pe_count,
+            "gfrun_timeout_seconds": GFRUN_TIMEOUT_SECONDS,
             "gfrun_memory_dump": {"range": args.dump_range,
                                   "output": str(args.artifact_dir / "gfrun.mem"),
                                   "chunks": chunks},

@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import re
 import subprocess
+import time
 
 from compare_memory import load_symbols
 from check_disassembly import function_body, function_body_exact, ir_function_body_exact
@@ -220,9 +221,24 @@ def main():
         assert body[0] + body[1] == after_guard[0], stem
     start = min(symbols[name][0] for name in expected)
     end = max(symbols[name][0] + len(raw) for name, raw in expected.items())
-    run([args.gfrun, '--pto059-execution-mask-dev', '-s', 'softcore.multiThreadNum=1',
-         '--dump-force', '--dump-memory', f'{start:#x}:{end-start:#x}:{out}/memory.bin',
-         '-f', out / 'kernel.elf'], out / 'gfrun.log')
+    started = time.monotonic()
+    exit_code, timed_out = None, False
+    try:
+        run([args.gfrun, '--pto059-execution-mask-dev', '-s', 'softcore.multiThreadNum=1',
+             '--dump-force', '--dump-memory', f'{start:#x}:{end-start:#x}:{out}/memory.bin',
+             '-f', out / 'kernel.elf'], out / 'gfrun.log')
+        exit_code = 0
+    except subprocess.TimeoutExpired:
+        exit_code, timed_out = 124, True
+        raise
+    except subprocess.CalledProcessError as error:
+        exit_code = error.returncode
+        raise
+    finally:
+        (out / 'gfrun-run.json').write_text(json.dumps({
+            'elapsed_seconds': time.monotonic() - started,
+            'timeout_seconds': 120, 'timed_out': timed_out,
+            'exit_code': exit_code}, indent=2) + '\n')
     assert 'Suaccelss to Reach the End of Benchmark! R2 = 0' in (out / 'gfrun.log').read_text()
     memory = (out / 'memory.bin').read_bytes()
     assert len(memory) == end - start
