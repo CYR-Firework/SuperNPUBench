@@ -9,7 +9,7 @@ import numpy as np
 
 SUITE = Path(__file__).resolve().parents[3] / 'kernel/element_wise/tile_element_suite'
 sys.path.insert(0, str(SUITE))
-from qli_topk_fixture import profiles as static_profiles
+from qli_topk_fixture import original_profiles as static_profiles
 from qli_histogram_fixture import oracle as cumulative_histogram
 
 SPEC_PIN = '8f589b70085a37c70f210898b168aae634da5ac1'

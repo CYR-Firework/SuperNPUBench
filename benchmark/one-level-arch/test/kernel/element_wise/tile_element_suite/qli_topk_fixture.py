@@ -6,11 +6,22 @@ import struct
 from qli_histogram_fixture import oracle as cumulative_histogram
 
 
-def profiles():
+def original_profiles():
     return ((64, 128, 128), (4, 2048, 512), (4, 8192, 512), (4, 2080, 512))
 
 
+def profiles():
+    return original_profiles() + ((2, 128, 73), (1, 128, 128), (2, 32, 17))
+
+
 def scores(sq, skv):
+    if skv == 128 and sq in (1, 2):
+        # Raw-bit ordering composes signed values, zeros, infinities, NaN
+        # payloads, a tied cutoff, and the valid key zero (0xffffffff input).
+        bits = (0xffffffff, 0xffc00001, 0xff800000, 0xc0000000,
+                0x80000000, 0, 0x3f800000, 0x7f800000, 0x7fc00001)
+        return [bits[(row * 3 + i) % len(bits)]
+                for row in range(sq) for i in range(skv)]
     # Unique positive finite FP32 scores; integer bit order equals numeric order.
     return [0x3f000000 + ((row * 1009 + i * 8191) % 0x7fffff)
             for row in range(sq) for i in range(skv)]
@@ -18,9 +29,10 @@ def scores(sq, skv):
 
 def storage_golden(sq, skv, k):
     raw = scores(sq, skv)
-    selected = [sorted(range(skv), key=lambda i: raw[row * skv + i], reverse=True)[:k]
+    keys = [0xffffffff - value if value >= 2**31 else value + 2**31
+            for value in raw]
+    selected = [sorted(range(skv), key=lambda i: keys[row * skv + i], reverse=True)[:k]
                 for row in range(sq)]
-    keys = [value + 0x80000000 for value in raw]
     threshold = keys[(sq - 1) * skv + selected[-1][-1]]
     last_chunk = keys[(sq - 1) * skv + ((skv - 1) // 2048) * 2048:]
     hist = cumulative_histogram(last_chunk, 0, threshold)
@@ -35,7 +47,12 @@ def compare_storage(actual, expected, sq, skv, k):
     for row in range(sq):
         indices = actual_words[row * k:(row + 1) * k]
         wanted = expected_words[row * k:(row + 1) * k]
-        if len(set(indices)) != k or set(indices) != set(wanted):
+        key_offset = count + 2048 + row * skv
+        keys = expected_words[key_offset:key_offset + skv]
+        threshold = min(keys[index] for index in wanted)
+        strict = {i for i, value in enumerate(keys) if value > threshold}
+        if (len(set(indices)) != k or any(index >= skv for index in indices) or
+                not strict <= set(indices) or any(keys[index] < threshold for index in indices)):
             raise AssertionError(f'row {row}: wrong unordered TopK indices')
     if actual[count * 4:] != expected[count * 4:]:
         raise AssertionError('QLI key/histogram/prefix scratch or reserved gap mismatch')

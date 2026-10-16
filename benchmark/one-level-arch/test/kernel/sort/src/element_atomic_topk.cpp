@@ -160,18 +160,18 @@ CoherenceProbeResult run_coherence_probe() {
   uint32_t *histogram = element_atomic_topk_coherence_hist;
   for (std::size_t part = 0; part < parts.size(); ++part) {
     auto view = parts.part(part);
-    ElementTile<uint32_t, kPartElements> values, bins, old;
-    TADDS(values, view, 0u);
-    TSHRS(bins, values, 8u);
-    auto &bucket_elements = TPARTELEMENT(bins);
+    ElementTile<uint32_t, kPartElements> values, old;
+    TMOV(values, view);
+    const auto &value_elements = TPARTELEMENT(values);
     auto &old_elements = TPARTELEMENT(old);
     const uint32_t valid_elements = parts.valid_size(part);
 // 此循环按元素生成谓词和 Tile 指令；未选中的元素不触发原子访存。
 #pragma pto element for
     for (unsigned element = 0; element < kPartElements; ++element) {
       if (element < valid_elements) {
+        const uint32_t bucket = value_elements[element] >> 8;
         old_elements[element] = __atomic_fetch_add(
-            &histogram[bucket_elements[element]], 1u, __ATOMIC_RELAXED);
+            &histogram[bucket], 1u, __ATOMIC_RELAXED);
       } else {
         old_elements[element] = 0u;
       }

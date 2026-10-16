@@ -322,7 +322,9 @@ inline void RadixExtract(RU* key_ptr, RU kthVal, RU chunkBase, int32_t* outBase,
         for (uint32_t element = 0; element < CKV; ++element) {
             const bool take = keys[element] > kthVal;
             counts[element] = take ? 1u : 0u;
-            values[element] = take ? keys[element] : 0u;
+            // PopN selects eligible indices; zero remains the cleared marker
+            // even when the original sortable key is itself zero.
+            values[element] = take ? element + 1u : 0u;
         }
         t1 s; TROWSUM(s, sel1);
         RU cnt = 0; gi1 gcnt(&cnt); TSTORE(gcnt, s);
@@ -340,7 +342,7 @@ inline void RadixExtract(RU* key_ptr, RU kthVal, RU chunkBase, int32_t* outBase,
         for (uint32_t element = 0; element < CKV; ++element) {
             const bool take = keys[element] == kthVal;
             counts[element] = take ? 1u : 0u;
-            values[element] = take ? keys[element] : 0u;
+            values[element] = take ? element + 1u : 0u;
         }
         t1 s; TROWSUM(s, sel1);
         RU cnt = 0; gi1 gcnt(&cnt); TSTORE(gcnt, s);
@@ -372,14 +374,23 @@ template <int Sq, int Skv, int topK>
 void qli_topk_radix(float* scores_gm, int32_t* indices_gm) {
     using namespace qli_radix;
     static_assert(Skv % 8 == 0, "Skv must be multiple of 8");
-    static_assert(topK <= Skv, "topK must be <= Skv");
+    static_assert(Sq > 0 && topK > 0 && topK <= Skv,
+                  "QLI requires Sq > 0 and 0 < topK <= Skv");
 
     constexpr int MaxTileCol = 2048;
     constexpr int NumChunks = (Skv + MaxTileCol - 1) / MaxTileCol;
     constexpr int TailCols = Skv - (NumChunks - 1) * MaxTileCol;
     constexpr int SinglePhy = (Skv < 128) ? 128 : Skv;
     constexpr int TailPhy = (TailCols < 128) ? 128 : TailCols;
+    static_assert((NumChunks == 1 && (Skv == 32 || Skv == 128 || Skv == 2048)) ||
+                  (NumChunks > 1 &&
+                   (TailCols == 32 || TailCols == 128 || TailCols == 2048)),
+                  "QLI element views require full 128/2048 columns or a 32-column tail");
 
+    // The caller supplies disjoint score and output/workspace allocations.
+    // Workspace holds Sq*topK indices, an existing 8192-byte reserved span,
+    // Sq*Skv keys, 256 histogram words, and 32 prefix words. The inner key and
+    // histogram helpers separately preserve their documented alias snapshots.
     uint32_t* key_scratch = reinterpret_cast<uint32_t*>(
             reinterpret_cast<uint8_t*>(indices_gm) + (uint64_t)Sq * topK * 4 + 8192);
     uint32_t* hist_scratch = key_scratch + (uint64_t)Sq * Skv;

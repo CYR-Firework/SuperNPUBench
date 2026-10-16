@@ -15,8 +15,10 @@ partial loads and logical-order stores; the benchmark defines no private Tile
 classes or copied arithmetic backend. The requested public extension is kept
 in existing TileOp API headers and requires `PTO_TILEOP_API_HAS_ELEMENT_TILE`.
 
-TileOps prepare radix digits. The element-wise loop performs histogram updates,
-then TileOp stores return old values in logical input element order. The compiler
+Tile loads and views prepare a bounded input snapshot. Ordinary scalar shifts,
+comparisons and atomic updates run inside each marked element loop, then Tile
+stores return old values in logical input element order. The coherence probe in
+the runnable driver follows the same model; the source gate checks both files. The compiler
 converts each logical U32 histogram index stream through one B32-to-B64 TLEA
 before masked MGATHER.ADD. Top-K results are an unordered multiset; the
 independent verification stage sorts them for comparison only. Optimized IR
@@ -62,15 +64,14 @@ stores. It also checks optimized generic IR and rejects narrow index fallback
 or residual scalar element lowering. Full histograms use a tail predicate; the
 selected histogram combines tail and digit predicates through generic CFG mask
 construction. Negative disassembly and IR canaries prove these checks reject
-corrupted instructions. Both gfrun and gfsim must then run as one logical
-thread/PE and match the independently generated input, histogram, Top-K, and
-status and coherence memory segments. The gfsim profile explicitly enables
-`bctrl.assemble_enable=true`; the retained command provenance records this
-existing feature switch alongside the single-context settings. Queue capacities
-and watchdogs retain their defaults. UART text is diagnostic only and is not used as the
-correctness oracle:
+corrupted instructions. Current acceptance runs gfrun as one logical thread/PE
+and compares the independently generated input, histogram, Top-K, status and
+coherence memory segments. Queue capacities and the 120-second timeout retain
+their defaults. Earlier dual-model evidence remains historical; gfsim changes
+and qualification belong to a separate PR. UART text is diagnostic only:
 
 ```sh
+MODELS=gfrun \
 COMPILER_DIR=/path/to/fresh-llvm-build/bin \
 LINX_RUNTIME_ROOT=/path/to/linx_blockisa_llvm_musl \
 API_INCLUDE=/path/to/Linx-TileOP-API/include \
@@ -89,9 +90,9 @@ symbol table, compiler/model logs, both memory dumps, independent goldens, and
 `provenance.json` with commands, configs, tool and ELF hashes, repository
 revisions/diff hashes, runtime-library hashes, and the TileOP header hash.
 
-The general sort `compile.all` and repository compile smoke keep their legacy
-behavior. Set `ELEMENT_ATOMIC_TOPK=on` together with `LINX_RUNTIME_ROOT` and
-`API_INCLUDE` to opt this draft PTO 0.59 case into those broader scripts.
+This directory's `compile.all` builds the canonical element-for example using
+`LINX_RUNTIME_ROOT` and `API_INCLUDE`. The distinct upstream Tile-op TopK lives
+under `kernels/multi_thread/topk/`; it is not counted as element-for migrated.
 
 The additional native [Tile/element-wise suite](../../element_wise/tile_element_suite/README.md)
 covers standalone histogram, selected radix histogram, and actual Top-K boundary
@@ -99,3 +100,27 @@ calls with independent goldens on gfrun and gfsim. Host reference tests are an
 independent oracle, not an alternative TileOp implementation.
 
 应用中的 element array 下标表示逻辑元素。`#pragma pto element for` 要求编译器分析紧随其后的 for 循环；不能忽略 pragma 并退化成普通标量代码。
+
+
+## Alternating Tile operations and element loops
+
+A Tile value remains usable by subsequent Tile operations after an element
+loop updates it. The public views describe logical elements; the compiler owns
+the SSA versions, masks and Local storage. The programmer keeps normal C++
+statement order and does not insert barriers or expose physical layouts.
+
+QLI's `RadixPopN` is the repeated alternation gate: it calls `TROWARGMAX`, stores
+the selected logical index, clears that lane through `TPARTELEMENT` in a marked
+loop, then calls `TROWARGMAX` again on the updated Tile. A real outlined Tile
+helper returns the updated carrier to its caller. The supported helper boundary
+is an internal direct void helper with one mutable NORM row; arbitrary nested
+or aliased Tile helpers are not qualified by this example.
+
+QLI's static TopK returns an unordered set of unique indices. Its transformed
+U32 score keys define the raw-bit ordering, including signed zeros and special
+FP32 encodings. The GT stage selects every strictly larger key; the EQ stage
+fills any required tied subset. Candidate Tiles carry nonzero logical lane tags,
+so a valid key zero is distinct from an inactive or cleared candidate. Dynamic
+QLI also predicates candidates by the actual tail width. Inputs and the outer
+TopK output/workspace allocations are disjoint; the inner key/histogram helpers
+separately provide their documented complete-chunk alias snapshots.

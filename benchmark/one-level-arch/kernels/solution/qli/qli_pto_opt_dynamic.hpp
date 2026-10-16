@@ -252,7 +252,8 @@ inline void PopN(TKey& mv, RU chunkBase, int32_t* out, int n) {
     }
 }
 
-inline void Extract(RU* key_ptr, RU kthVal, RU chunkBase, int32_t* outBase, int& outPos, int& needEq) {
+inline void Extract(RU* key_ptr, RU kthVal, RU chunkBase, int32_t* outBase,
+                    int& outPos, int& needEq, uint32_t valid_columns) {
     // v0.58.4 行归约契约：TROWSUM 目的须物理单列 [N,1]
     using t1 = Tile<Location::Vec, RU, 32, 1, BLayout::RowMajor, 1, 1>;
     gkRow g(key_ptr);
@@ -264,9 +265,9 @@ inline void Extract(RU* key_ptr, RU kthVal, RU chunkBase, int32_t* outBase, int&
       auto &values = TPARTELEMENT(cand);
 #pragma pto element for
       for (uint32_t element = 0; element < MaxTileCol; ++element) {
-          const bool take = keys[element] > kthVal;
+          const bool take = element < valid_columns && keys[element] > kthVal;
           counts[element] = take ? 1u : 0u;
-          values[element] = take ? keys[element] : 0u;
+          values[element] = take ? element + 1u : 0u;
       }
       t1 s; TROWSUM(s, sel1);
       RU cnt = 0; gk1 gcnt(&cnt); TSTORE(gcnt, s);
@@ -280,9 +281,9 @@ inline void Extract(RU* key_ptr, RU kthVal, RU chunkBase, int32_t* outBase, int&
       auto &values = TPARTELEMENT(cand);
 #pragma pto element for
       for (uint32_t element = 0; element < MaxTileCol; ++element) {
-          const bool take = keys[element] == kthVal;
+          const bool take = element < valid_columns && keys[element] == kthVal;
           counts[element] = take ? 1u : 0u;
-          values[element] = take ? keys[element] : 0u;
+          values[element] = take ? element + 1u : 0u;
       }
       t1 s; TROWSUM(s, sel1);
       RU cnt = 0; gk1 gcnt(&cnt); TSTORE(gcnt, s);
@@ -298,9 +299,18 @@ inline void qli_topk_radix_dynamic(float* scores_gm, int32_t* indices_gm,
                                    uint32_t* key_scratch)
 {
     using namespace qli_radix_dyn;
+    if (Sq < 0 || Skv <= 0 || Skv > __INT_MAX__ - MaxTileCol ||
+        topK < 0 || topK > Skv || numPEs <= 0 || numPEs > 4)
+        __builtin_trap();
+    if (Sq == 0 || topK == 0)
+        return;
     int NumChunks = (Skv + MaxTileCol - 1) / MaxTileCol;
     int paddedSkv = NumChunks * MaxTileCol;
+    if (static_cast<uint64_t>(Sq) * static_cast<uint32_t>(paddedSkv) > __INT_MAX__)
+        __builtin_trap();
     const uint32_t tid = get_thread_idx();
+    if (tid >= static_cast<uint32_t>(numPEs))
+        return;
 
     // 每 PE 独立的 hist/prefix scratch（256 + 32 uint32 = 1152B）
     // 多 PE 并行时共享同一 buffer 会互相覆盖（直方图数据竞争）
@@ -316,7 +326,8 @@ inline void qli_topk_radix_dynamic(float* scores_gm, int32_t* indices_gm,
         for (int c = 0; c < NumChunks; c++)
             MakeKey(krow + c * MaxTileCol, row + c * MaxTileCol);
 
-        // 末 chunk 填充区清零（key=0 为最小值，不进入 TopK）
+        // 末 chunk 填充区清零；提取时另以 valid_columns 排除填充位置，
+        // 因而原始有效 key=0 仍可以参加 TopK。
         int padStart = Skv - (NumChunks - 1) * MaxTileCol;
         if (padStart < MaxTileCol) {
             const uint32_t first = static_cast<uint32_t>(padStart);
@@ -366,9 +377,12 @@ inline void qli_topk_radix_dynamic(float* scores_gm, int32_t* indices_gm,
         // Step 3: 提取 topK 索引
         int outPos = 0;
         int needEq = remaining;
-        for (int c = 0; c < NumChunks; c++)
+        for (int c = 0; c < NumChunks; c++) {
+            const uint32_t valid_columns = static_cast<uint32_t>(
+                c + 1 == NumChunks ? Skv - c * MaxTileCol : MaxTileCol);
             Extract(krow + c * MaxTileCol, kth_value, (RU)c * MaxTileCol,
-                    indices_gm + i * topK, outPos, needEq);
+                    indices_gm + i * topK, outPos, needEq, valid_columns);
+        }
     }
 }
 
