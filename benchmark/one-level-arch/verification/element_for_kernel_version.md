@@ -98,3 +98,25 @@ QLI 和原始 low-precision matmul 的运行入口见
 17 个 TopK 边界配置，以及 QLI、predicate 和原始 matmul 的相应数值用例。
 本轮只验收 gfrun。gfsim/TimingSim 另行验证；CUBE_M16/A16 完整 element 迁移及
 剩余 QSMLA 配置仍保留在原始 21 应用清单中，不由 TopK 示例替代。
+
+## 2026-10-19 固定版本验收
+
+LLVM `03019e0f794d6f3cf57407508e3d7aedc705fc81`、API `03ef51d`、
+gfrun `0a237ccfe`、benchmark `aa97d6d` 在干净源码上重新构建并完成验收：
+
+- element suite **64/64**，含四个真实四 PE wrapper 和 TopK 边界配置；
+- 核心 777 元素 TopK **9/9 内存段**；solution 回归 **21/21**；
+- QLI key48、histogram72、NORM13、PopN18、静态 TopK7、原始 driver5、动态 TopK4；
+- 原始低精度 matmul **7/7**，predicate 原始/浮点边界各 7 项，D6 和 issue-130；
+- MoE 补充边界 driver **1/1**，11 个长度各重复调用两次。
+
+独立最终审计通过，核验 **2,843 项哈希**，没有缺失或失败项。
+精确版本、结果和 artifact 路径见 `pto_element_migration.json` 的
+`masked_element_gfrun_20261019`；本次文档提交发生在验收之后，不改写已记录版本。
+
+以上关闭本轮 gfrun 配置验收，不代表 LLVM 全部测试可合入：28 个旧 pragma
+fixture 仍需迁移到 masked-only 契约，issue-60 的合法 guard-correlated 程序仍有
+路径证明缺口。公共 pointer TLOAD 的部分 parent 搬运可能使用 marked region
+之外的 scalar tail copy；本轮 MoE helper 已改用 bounded masked MGATHER。
+完整原始应用库存仍为 17/21 个已验证 profile，四条 pending 路径不由
+solution 的 21/21 数值回归替代。gfsim 继续留到后续 PR。

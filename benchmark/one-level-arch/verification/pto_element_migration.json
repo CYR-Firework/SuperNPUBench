@@ -1635,5 +1635,102 @@
       "remaining QSMLA configurations and full 21-entry source/configuration inventory closure",
       "timing/gfsim qualification in separate PR"
     ]
+  },
+  "masked_element_gfrun_20261019": {
+    "status": "qualified_functional_profiles",
+    "models": [
+      "gfrun"
+    ],
+    "timeout_seconds": 120,
+    "repositories": {
+      "compiler": {
+        "path": "/Users/zhoubot/.codex/worktrees/pto-element-fp32-memory-llvm",
+        "head": "03019e0f794d6f3cf57407508e3d7aedc705fc81",
+        "status": ""
+      },
+      "benchmark": {
+        "path": "/Users/zhoubot/.codex/worktrees/pto-element-fp32-memory-bench",
+        "head": "aa97d6dea4717428c74fd13799dde1a49775a605",
+        "status": ""
+      },
+      "tileop_api": {
+        "path": "/Users/zhoubot/.codex/worktrees/pto-element-f16-dense-api",
+        "head": "03ef51d16ec7d25a2dd48ded8d8f6725e95df950",
+        "status": ""
+      },
+      "model": {
+        "path": "/Users/zhoubot/.codex/worktrees/pto-element-functional-model",
+        "head": "0a237ccfe8404d73d92dd144a6af539b2b0ebc5a",
+        "status": ""
+      }
+    },
+    "artifact_root": "/tmp/pto-element-followup-20261018/final-masked-v15-20261019",
+    "audit": {
+      "path": "/tmp/final-audit-v15.json",
+      "sha256": "5c59ba49909cd0997409cd2c4ddb204af32cd675bf6ec27695f4c177b7d0152d",
+      "verified_hashes": 2843,
+      "passed": true,
+      "errors": []
+    },
+    "results": {
+      "element_suite": {
+        "passed": 64,
+        "total": 64,
+        "memory_segments": 455,
+        "status_segments": 56
+      },
+      "topk777": {
+        "passed_segments": 9,
+        "total_segments": 9
+      },
+      "solution_regressions": {
+        "passed": 21,
+        "total": 21
+      },
+      "moe_boundary_driver": {
+        "passed": 1,
+        "total": 1,
+        "lengths": 11,
+        "calls_per_length": 2
+      },
+      "qli": {
+        "key": 48,
+        "histogram": 72,
+        "norm": 13,
+        "popn": 18,
+        "static_topk": 7,
+        "original_drivers": 5,
+        "dynamic_topk": 4
+      },
+      "original_lowp_matmul": {
+        "passed": 7,
+        "total": 7
+      },
+      "predicate": {
+        "original_outputs": 7,
+        "edge_outputs": 7
+      },
+      "d6": true,
+      "issue130": true
+    },
+    "masked_contract": "Marked element data paths require native masked Tile lowering. Missing/false generic lowering, O0 and incomplete regions diagnose; no scalar/unmasked fallback.",
+    "moe_scope": [
+      "group_token_old histogram clear/load/count",
+      "group_token_vec_mt_dyn histogram clear/load/count"
+    ],
+    "checks": {
+      "helper_checker_tests": 15,
+      "solution_runner_tests": 11,
+      "exact_helper_source_ir_native": "PASS; per-operation masks, scalar data memory/atomics/extraction/hidden calls rejected"
+    },
+    "known_limits": [
+      "28 unchanged legacy pragma compiler fixtures require migration to masked-only contract; not silently reclassified as passing",
+      "issue-60 valid guarded Tile program remains unsupported by path-insensitive native-distance proof",
+      "Complete dynamic legacy driver requires separate generic histogram TU",
+      "Public pointer TLOAD partial-parent transport can use scalar tail copy outside marked regions; MoE migrated helpers use bounded masked MGATHER instead",
+      "Original21 application inventory retains17 verified profiles and4 pending paths; distinct from21 solution regressions",
+      "gfsim/TimingSim deferred"
+    ],
+    "skill_evolve": "no-update; project-specific changes documented in repository and existing compiler/runtime proof gates"
   }
 }
