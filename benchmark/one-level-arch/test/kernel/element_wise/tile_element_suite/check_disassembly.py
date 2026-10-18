@@ -964,7 +964,8 @@ def validate_group_count(text: str, ir_text: str | None) -> None:
     )
     if len(atomic_calls) != 1:
         raise CheckError("group_count lost its single masked atomic intrinsic")
-    load_position = ir.find("BSTART.TLSU TLOAD")
+    load = re.search(r"BSTART\.(?:TLOAD\s|TLSU TLOAD,)", ir)
+    load_position = load.start() if load else -1
     reset = re.search(
         r"store i32 0, ptr [^\n]+|"
         r"call void @llvm\.memset[^\n]*i8 0, i64 128,",

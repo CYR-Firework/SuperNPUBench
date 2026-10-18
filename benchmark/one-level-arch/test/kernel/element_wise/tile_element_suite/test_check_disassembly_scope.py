@@ -29,6 +29,34 @@ class CheckerFunctionScopeTest(unittest.TestCase):
    128: ce619181              BSTART.TEPL TCI, U32
 """
 
+    def test_group_count_snapshot_order_with_canonical_load(self):
+        native = """
+00000100 <group_countILi16>:
+ 100: 00000000 BSTART.TLSU TLOAD, U32
+ 104: 00000000 BSTART.TEPL TADDS, U32
+ 108: 00000000 B.SUBVIEW CUBE_M32
+ 10c: 00000000 BSTART.TEPL TLEA, U32
+ 110: 00000000 BSTART.TLSU MGATHER.ADD, U32
+ 114: 00000000 B.IOR [a3,s4,zero], ExecMaskPresent
+"""
+        ir = """define void @group_countILi16() {
+  call void asm sideeffect "BSTART.TLOAD U32", ""()
+  store i32 0, ptr %out
+  %bound = freeze i32 32
+  %wide = zext i32 %bound to i64
+  %addr = call <32 x i64> @llvm.linx.experimental.ew.tlea(i64 32, i64 1, i64 25, i64 29, <32 x i32> %index, i64 32)
+  %mask = call i64 @llvm.linx.experimental.ew.tcmps.gpr(i64 32, i64 1, i64 25, i64 29, <32 x i32> %index, i64 %wide, i64 2)
+  %old = call <32 x i32> @llvm.linx.experimental.ew.mgather.add.masked()
+  ret void
+}
+"""
+        for text in (ir, ir.replace("BSTART.TLOAD U32", "BSTART.TLSU TLOAD, U32")):
+            CHECKER.validate_group_count(native, text)
+            moved = text.replace('  store i32 0, ptr %out\n', '')
+            moved = moved.replace('  call void asm', '  store i32 0, ptr %out\n  call void asm')
+            with self.assertRaisesRegex(CHECKER.CheckError, 'snapshot before'):
+                CHECKER.validate_group_count(native, moved)
+
     def test_exact_extractors_do_not_select_prefix_clone(self):
         disassembly = """
 00000000 <kernel.clone>:
