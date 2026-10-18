@@ -33,6 +33,33 @@ QLI 的 [`qli_element.hpp`](../kernels/solution/qli/qli_element.hpp) 及
 simple/dynamic kernel 还覆盖反复的 Tile reduction → element update → Tile reduction，
 包括 outlined Local Tile helper、运行期边界和相同 workspace 重复调用。
 
+## Masked Tile 编程契约
+
+`#pragma pto element for` 是编译约束：已支持的元素数据路径必须生成带执行
+mask 的原生 Tile 运算；不支持的表达式、别名或控制流应报错，不能回退到 scalar
+循环。开发版编译器要求 `-mllvm -linxv5-enable-generic-element=true`；缺少或关闭
+该选项、`-O0`、以及残留未完成的 marked region 均拒绝编译。
+
+外层分块、PE 调度、统一地址计算和 packed predicate 的 GPR 运算仍可使用
+scalar 指令。验收禁止的是逐元素数据计算、加载、写回或原子操作退化为 scalar。
+TopK 的 cutoff 扫描和紧凑输出有跨元素依赖，仍是明确保留的顺序阶段。
+
+MoE 的单 PE `group_token_old` 和四 PE 动态 `group_token_vec_mt_dyn` histogram
+采用 32 元素 marked loops：先用有效长度 mask 加载输入，再用有效长度和 expert
+范围 mask 执行原子计数。输入不要求新增 padding，清零同样使用 masked scatter。
+PE 行分工、跨 PE barrier、后续 prefix sum 和稳定排序保持原顺序。
+动态 histogram 位于独立编译单元；当前完整旧 driver 在全局 generic 模式下仍有
+Tile descriptor 编译限制，不能据此宣称任意混合编译单元均已支持。
+
+`run_solution_gfrun_regressions.py` 对这两个迁移用例先检查具体 helper 的源码、
+优化 IR 和 ELF 反汇编，再运行数值测试。检查拒绝 scalar 数据 load/store、
+scalar atomic、原子 helper 和 vector extract/insert；缺失执行 mask 也必须失败。
+`test_check_moe_element_histograms.py` 保留对应的故障注入测试。
+同一 runner 显式选择 `--only group_token_histogram_element` 可运行 11 个边界长度、
+重复调用、非法 expert id 和输出 guard 的独立测试；该补充用例不改变原 21 项分母。
+MoE combine 的算术已有 Tile 运算；prefix/rank 和 MegaMoE 的变长内循环仍需独立
+依赖分析与编译支持，不把普通外层循环机械改成 element loop。
+
 ## 构建与运行
 
 使用彼此匹配的开发版 LLVM、TileOP API 和 gfrun。完整运行库提供 musl sysroot；

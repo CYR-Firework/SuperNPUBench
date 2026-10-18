@@ -5,6 +5,8 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
+from types import SimpleNamespace
 
 
 MODULE_PATH = Path(__file__).with_name("run_solution_gfrun_regressions.py")
@@ -19,6 +21,12 @@ class SolutionGfrunRegressionTest(unittest.TestCase):
     def test_inventory_is_exactly_twenty_one_unique_cases(self):
         self.assertEqual(21, len(gate.CASES))
         self.assertEqual(21, len({case.name for case in gate.CASES}))
+
+    def test_boundary_case_does_not_change_original_denominator(self):
+        self.assertEqual(["group_token_histogram_element"],
+                         [case.name for case in gate.SUPPLEMENTAL_CASES])
+        self.assertFalse({case.name for case in gate.CASES} &
+                         {case.name for case in gate.SUPPLEMENTAL_CASES})
 
     def test_nonzero_process_status_never_passes(self):
         ok, reason = gate.classify_gfrun(
@@ -62,6 +70,26 @@ class SolutionGfrunRegressionTest(unittest.TestCase):
             0, "Success to Reach the End of Benchmark! R2 = 0\n", timed_out=True)
         self.assertFalse(ok)
         self.assertEqual("timeout", reason)
+
+    def test_numerical_run_cannot_bypass_failed_lowering(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            args = SimpleNamespace(output=root, compiler_dir=root,
+                                   target_triple="linx64v5-unknown-linux-musl",
+                                   sysroot=root, resource_dir=root, api_include=root,
+                                   objdump=root / "objdump", compile_timeout=120)
+            case = next(case for case in gate.CASES if case.name == "group_token_old")
+            with patch.object(gate, "external_flags", return_value=("", "")), \
+                 patch.object(gate, "external_tool_vars", return_value=[]), \
+                 patch.object(gate, "run_logged", return_value=(0, False)) as run, \
+                 patch.object(gate, "find_fresh_elf", return_value=root / "case.elf"), \
+                 patch.object(gate, "sha256", return_value="hash"), \
+                 patch.object(gate, "check_histogram_lowering",
+                              return_value=(False, "element_lowering_failed")):
+                result = gate.run_case(case, args, {})
+            self.assertFalse(result["passed"])
+            self.assertEqual("element_lowering_failed", result["status"])
+            self.assertEqual(1, run.call_count)  # Compile only; gfrun cannot mask it.
 
     def test_log_is_bounded_and_keeps_tail(self):
         with tempfile.TemporaryDirectory() as directory:

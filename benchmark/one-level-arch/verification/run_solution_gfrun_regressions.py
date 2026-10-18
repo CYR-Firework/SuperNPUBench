@@ -109,6 +109,13 @@ CASES = (
 )
 
 
+# Explicit opt-in coverage; never changes the original 21-case denominator.
+SUPPLEMENTAL_CASES = (
+    Case("group_token_histogram_element", "group_token_old",
+         ("TESTCASE=group_token_histogram_element",), 1),
+)
+
+
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -343,6 +350,44 @@ def run_external_oracle(case: Case, args: argparse.Namespace,
     return True, "oracle_pass"
 
 
+def check_histogram_lowering(case: Case, args: argparse.Namespace,
+                             base_env: dict[str, str], case_dir: Path,
+                             make_vars: list[str], elf: Path) -> tuple[bool, str]:
+    """Numerical success cannot hide scalarization of the migrated helpers."""
+    if case.name not in ("group_token_old", "group_token_vec_mt_dyn"):
+        return True, "not_applicable"
+    import check_moe_element_histograms as checker
+
+    dynamic = case.name == "group_token_vec_mt_dyn"
+    source = ONE_LEVEL / "kernels/solution" / (
+        "group_token_vec/group_token_vec_mt_dyn_histogram.cpp" if dynamic else
+        "group_token_old/group_token_old.hpp")
+    ir = case_dir / "element-histogram.ll"
+    target = "histogram-ir" if dynamic else "ir"
+    rc, timed_out = run_logged(
+        ["make", *make_vars, f"IR_TARGET={ir}", target],
+        cwd=SOLUTION / case.unit, env=base_env,
+        log=case_dir / "element-ir-compile.log", timeout=args.compile_timeout)
+    if rc != 0 or timed_out or not ir.is_file():
+        return False, "element_ir_compile_failed"
+    disassembly = case_dir / "element-histogram.dis"
+    rc, timed_out = run_logged(
+        [str(args.objdump), "-d", str(elf)], cwd=case_dir, env=base_env,
+        log=disassembly, timeout=args.compile_timeout)
+    if rc != 0 or timed_out:
+        return False, "element_disassembly_failed"
+    try:
+        checker.validate_artifact(source.read_text(), ir.read_text(),
+                                  disassembly.read_text(),
+                                  checker.DYNAMIC if dynamic else checker.OLD)
+    except checker.CheckError as error:
+        (case_dir / "element-lowering-check.log").write_text(str(error) + "\n")
+        return False, "element_lowering_failed"
+    (case_dir / "element-lowering-check.log").write_text(
+        "PASS: exact helper source, masked IR and native Tile data path\n")
+    return True, "masked_tile_pass"
+
+
 def run_case(case: Case, args: argparse.Namespace, base_env: dict[str, str]) -> dict[str, object]:
     case_dir = args.output / "cases" / case.name
     obj_root = case_dir / "obj"
@@ -372,6 +417,13 @@ def run_case(case: Case, args: argparse.Namespace, base_env: dict[str, str]) -> 
         result.update(status="missing_fresh_elf", error=str(error))
         return result
     result.update(elf=str(elf), elf_sha256=sha256(elf))
+
+    lowering_passed, lowering_status = check_histogram_lowering(
+        case, args, base_env, case_dir, make_vars, elf)
+    result["element_lowering_status"] = lowering_status
+    if not lowering_passed:
+        result["status"] = lowering_status
+        return result
 
     command = [str(args.gfrun), "--pto059-execution-mask-dev", "-s",
                f"softcore.multiThreadNum={case.pe_count}", "-f", str(elf)]
@@ -445,7 +497,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     selected = list(CASES)
     if args.only:
         wanted = set(args.only)
-        selected = [case for case in CASES if case.name in wanted]
+        selected = [case for case in (*CASES, *SUPPLEMENTAL_CASES) if case.name in wanted]
         missing = sorted(wanted - {case.name for case in selected})
         if missing:
             print(f"unknown cases: {', '.join(missing)}", file=sys.stderr)
