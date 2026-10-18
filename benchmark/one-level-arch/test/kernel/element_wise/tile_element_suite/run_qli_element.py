@@ -107,7 +107,7 @@ def check_popn_native(disassembly, ir, profiles):
         assert len(returns) == 2, (symbol, 'one native return')
         export = re.split(r'BSTART\.TLSU\s+TMOV,\s+U32\b', returns[0])[-1]
         assert len(re.findall(r'BSTART\.TLSU\s+TMOV,\s+U32\b', returns[0])) >= 1
-        assert re.search(r'B\.IOT\s+t#1,.*last,\s+->t<', export), (symbol, 'return export')
+        assert re.search(r'B\.IOT\s+t#1(?:\.reuse)?,.*last,\s+->t<', export), (symbol, 'return export')
         assert not re.search(r'BSTART\.(?:TLSU|TEPL)', export), (symbol, 'last Tile producer')
         helpers[shape] = symbol
     expected_shapes = {case[:2] for case in profiles}
@@ -136,7 +136,7 @@ def check_popn_native(disassembly, ir, profiles):
         assert len(transfers) == want, (symbol, 'native direct calls')
         for prefix in re.split(r'C?\.?BSTART\.STD\s+DIRECT,[^\n]*<' + re.escape(symbol) + r'>', caller_native)[:-1]:
             export = re.split(r'BSTART\.TLSU\s+TMOV,\s+U32\b', prefix)[-1]
-            assert re.search(r'B\.IOT\s+t#1,.*last,\s+->t<', export), (symbol, 'call export')
+            assert re.search(r'B\.IOT\s+t#1(?:\.reuse)?,.*last,\s+->t<', export), (symbol, 'call export')
             assert not re.search(r'BSTART\.(?:TLSU|TEPL)', export), (symbol, 'immediate Tile export')
 
 
