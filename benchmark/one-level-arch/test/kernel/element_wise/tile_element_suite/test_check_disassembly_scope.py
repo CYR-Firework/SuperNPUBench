@@ -29,6 +29,30 @@ class CheckerFunctionScopeTest(unittest.TestCase):
    128: ce619181              BSTART.TEPL TCI, U32
 """
 
+    def test_expression_requires_explicit_reusable_tile_sources(self):
+        instructions = ["BSTART.TLSU TLOAD, U32", "B.SUBVIEW"]
+        for op in ("TADD", "TSUB", "TSUB", "TMUL", "TDIV", "TREM",
+                   "TAND", "TOR", "TXOR", "TXOR", "TXOR", "TSHL", "TSHR"):
+            instructions.extend([
+                f"BSTART.TEPL {op}, U32", "B.DATR CUBE_M32, Zero",
+                "C.B.DIMI 1, ->lb0", "C.B.DIMI 32, ->lb1",
+                "B.IOT t#1.reuse, m#2.reuse, mask=1111, last, ->u<128B>",
+            ])
+        instructions.extend(["BSTART.TLSU TSTORE, U32"] * 3)
+        native = "00000100 <element_expression_chain>:\n" + "\n".join(
+            f" {0x100 + 4 * index:x}: 00000000 {line}"
+            for index, line in enumerate(instructions))
+        # Native validation passes, then the separate IR evidence is required.
+        with self.assertRaisesRegex(CHECKER.CheckError, "requires LLVM IR evidence"):
+            CHECKER.validate_expression(native, None)
+        for bad in (native.replace("t#1.reuse", "t#1"),
+                    native.replace("m#2.reuse", "m#2"),
+                    native.replace("t#1.reuse", "a1"),
+                    native.replace("->u<128B>", "->u<256B>")):
+            with self.subTest(bad=bad), self.assertRaisesRegex(
+                    CHECKER.CheckError, "Tile-to-Tile binding"):
+                CHECKER.validate_expression(bad, None)
+
     def test_group_count_snapshot_order_with_canonical_load(self):
         native = """
 00000100 <group_countILi16>:

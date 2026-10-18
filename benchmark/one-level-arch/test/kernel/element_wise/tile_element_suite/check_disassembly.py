@@ -526,7 +526,7 @@ def validate_expression(text: str, ir_text: str | None) -> None:
             raise CheckError("element expression operation is missing 32-element geometry")
         bindings = [line for line in bundle if "B.IOT" in line]
         if len(bindings) != 1 or not re.search(
-            r"B\.IOT\s+[mntu]#[0-9]+, [mntu]#[0-9]+, "
+            r"B\.IOT\s+[mntu]#[0-9]+\.reuse, [mntu]#[0-9]+\.reuse, "
             r"mask=1111, last,\s+->[mntu]<128B>",
             bindings[0],
         ):
