@@ -53,6 +53,35 @@ class CheckerFunctionScopeTest(unittest.TestCase):
                     CHECKER.CheckError, "Tile-to-Tile binding"):
                 CHECKER.validate_expression(bad, None)
 
+    def test_concat_f16_store_keeps_full_capacity_with_canonical_header(self):
+        native = """00000100 <concat_gather>:
+ BSTART.TLSU MGATHER, FP16
+ BSTART.TLSU TMOV, FP16
+ B.ASSEMBLE 1, 0, zero, 0, 1
+ BSTART.TLSU TMOV, FP16
+ BSTART.TLSU TMOV, FP16
+ B.ASSEMBLE 0, 1, zero, 1, 1
+ B.IOT mask=1111, last, ->t<1KB>
+ BSTART.TLSU TSTORE, FP16
+"""
+        lines = native.splitlines()
+        native = lines[0] + "\n" + "\n".join(
+            f" {0x100 + 4 * index:x}: 00000000 {line}"
+            for index, line in enumerate(lines[1:]))
+        ir = """define void @concat_gather() {
+ %offset = call <64 x i64> @llvm.linx.experimental.ew.tlea(i64 32, i64 2, i64 25, i64 29, <64 x i32> %index, i64 16)
+ %value = call <64 x half> @llvm.linx.experimental.ew.mgather.gpr.masked.v64f16.v64i64(i64 32, i64 2, i64 4, i64 0, i64 29, i64 24, ptr %source)
+ call void asm sideeffect "BSTART.TSTORE FP16", ""(<512 x half> %parent)
+ ret void
+}
+"""
+        for text in (ir, ir.replace("BSTART.TSTORE FP16", "BSTART.TLSU TSTORE, FP16")):
+            CHECKER.validate_concat_f16_original(native, text)
+            for bad in (text.replace("<512 x half>", "<64 x half>"),
+                        text.replace("TSTORE", "TLOAD")):
+                with self.assertRaisesRegex(CHECKER.CheckError, "whole 512-element"):
+                    CHECKER.validate_concat_f16_original(native, bad)
+
     def test_group_count_snapshot_order_with_canonical_load(self):
         native = """
 00000100 <group_countILi16>:

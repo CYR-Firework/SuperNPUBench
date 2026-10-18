@@ -1089,7 +1089,7 @@ def validate_concat_f16_original(text: str, ir_text: str | None) -> None:
         raise CheckError("F16 concat lost its FP16/M32/U64 gather ABI")
     if not re.search(r"i64 32, i64 2, i64 25, i64 29, <64 x i32>", offsets[0]) or not offsets[0].endswith("i64 16)"):
         raise CheckError("F16 concat lost its U32-to-B64 offset shape or 16-bit element scaling")
-    if not re.search(r"BSTART\.TLSU TSTORE[^\n]*<512 x half>", ir):
+    if not re.search(r"BSTART\.(?:TSTORE\s|TLSU TSTORE,)[^\n]*<512 x half>", ir):
         raise CheckError("F16 concat lost its whole 512-element raw store")
 
     native = "\n".join(instruction_lines(body))
@@ -1122,7 +1122,7 @@ def without_parent_queue_copies(body: str, terminal: str,
         if "<512B>" not in bundle:
             return bundle
         binding = re.search(
-            r"B\.IOT\s+([tu])#\d+, mask=1111, last,\s+->([tu])<512B>",
+            r"B\.IOT\s+([tu])#\d+\.reuse, mask=1111, last,\s+->([tu])<512B>",
             bundle)
         dtype = match.group(1)
         if (not terminal_sites or match.start() < terminal_sites[-1].start() or
@@ -1286,11 +1286,11 @@ def validate_original_f32(text: str, ir_text: str | None) -> None:
     # Both operands must be the actual corresponding raw Tile partition copies.
     for value, source in ((lhs, "%lhs"), (rhs, "%rhs")):
         transport_expr = definitions.get(value, "")
-        parent = re.search(r'asm sideeffect "BSTART\.TLSU TMOV,.*\(<128 x float> (%[\w.]+),', transport_expr)
-        if not parent or not re.search(r'asm sideeffect "BSTART\.TLSU TLOAD,.*\(ptr ' + re.escape(source) + ',', definitions.get(parent[1], "")):
+        parent = re.search(r'asm sideeffect "BSTART\.(?:TMOV\s|TLSU TMOV,).*\(<128 x float> (%[\w.]+),', transport_expr)
+        if not parent or not re.search(r'asm sideeffect "BSTART\.(?:TLOAD\s|TLSU TLOAD,).*\(ptr ' + re.escape(source) + ',', definitions.get(parent[1], "")):
             raise CheckError("FP32 original substituted a source Tile partition")
     # TSTORE consumes the computed result through its standard LCSSA publication.
-    stores = re.findall(r'call void asm sideeffect "BSTART\.TLSU TSTORE,[^\n]*', ir)
+    stores = re.findall(r'call void asm sideeffect "BSTART\.(?:TSTORE\s|TLSU TSTORE,)[^\n]*', ir)
     if len(stores) != 1:
         raise CheckError("FP32 original lost its one Tile store")
     stored = re.search(r'<32 x float> (%[\w.]+), i64 16, i32 1, i32 1, i32 32\)', stores[0])
@@ -1381,7 +1381,7 @@ def validate_masked_gather_scatter_f32(text: str,
                      scatter_calls[0]):
         raise CheckError("FP32 scatter lost F32/M32/S64 typing")
     raw_transport = re.findall(
-        r'call <32 x float> asm sideeffect "BSTART\.TLSU TMOV,[^\n]*', ir,
+        r'call <32 x float> asm sideeffect "BSTART\.(?:TMOV\s|TLSU TMOV,)[^\n]*', ir,
     )
     if len(raw_transport) != 1:
         raise CheckError("FP32 gathered payload needs one raw official TMOV")
