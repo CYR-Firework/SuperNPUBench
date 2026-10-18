@@ -13,8 +13,12 @@ pto-spec + public API + compiler + gfrun 为验收范围。执行时显式使用
 程序员通过 `ElementTile`、`TPARTVIEW`、`TPARTELEMENT` 交替使用 TileOp 和
 元素表达式，无需写物理 layout、lane 或私有生产头文件。
 
-[JSON 清单](pto_element_migration.json) 仍以 21 条原应用路径和 4 个多线程
-wrapper 为分母。`verified_profile` 只表示其证据所列源码和配置通过；未覆盖的
+[JSON 清单](pto_element_migration.json) 记录 21 条源码/配置库存路径；它们不是
+21 个回归用例，也不等于 21 个独立完成的应用。当前其中 17 条有精确记录的
+functional profile，4 条仍为 pending：`hashtable_lookup_simd`、
+`matmul_mx_scale_access`、`quant_sparse_flash_mla` 和
+`qsmla_sparse_index_collection`。4 个多线程 wrapper 单独记账。
+`verified_profile` 只表示其证据所列源码和配置通过；未覆盖的
 原 dtype、shape、算法路径和 wrapper 不能由 foundation 用例推断完成。
 `verified_functional_profile` 记录本轮 pto-spec/compiler/API/gfrun 范围；
 它不表示已取得 gfsim timing 证据。现有 FP32 functional 记录保持原证据。
@@ -130,26 +134,20 @@ vector168/168、memory25/25、scalar124/124，emu61/61，diff1148730/0。
 
 API仍有FP32大parent、2048元素FP16的多代assembly、完整parent的部分写入
 等边界；具体列表见JSON的`element_api_remaining_gaps`。24个运行profile
-不等于21条原应用/all configs及4个wrapper已完成。gfsim统一留到后续PR。
+不等于21条源码/配置库存路径及4个wrapper已全部完成。gfsim统一留到后续PR。
 
 ## 当前缺口
 
-- 其余未完成的原应用配置和4个多线程 wrapper 仍待完整迁移与验证；
-  已完成 functional 验证的 FP32 应用仅剩独立 timing 跟进。
-  特别是原 gather 的 rank-2 FP32 行索引/广播和四个配置，不能由 U32
-  indexed-gather foundation 替代。concat 的 S32/FP16、512 元素及完整数据容量
-  也仍须保留，不能缩小成 32 元素测试来宣称完成。
-- 当前已验证的32-element profile包括S32/U32和FP32。普通CFG的
-  if/continue/PHI、i32/f32 indexed gather、独立unit-stride scatter，以及
-  明确unordered/source契约下的单一隔离indexed scatter已有编译支持。
-  System/Monotonic i32 atomic add保持既有约束。FP32 memory现已取得原应用
-  functional证据；这不代表任意别名或多条无序写流都可接受。
-  FP16/U16 及匹配 S32/U32 的 logical64 profile 现已通过定向编译与功能门禁。
-  varying 内层循环、更大的 FP32 快照、其他原子操作/ordering、未证明隔离的
-  indexed 写入、O0 marked region 和引用参数 Tile 的提升/别名证明仍未闭合。
-- API 提供某 dtype 的存储/transport，不等于该 dtype 的 marked element loop
-  已可执行。QLI 私有 histogram 汇编、稀疏 MLA 的 spill/标量索引阶段、动态
-  哈希探测都需要各自的完整算法迁移，不能用新的小型 histogram 替代。
+- 剩余源码/配置路径为 SIMD hashtable lookup、完整 CUBE_M16/A16 matmul
+  element 访问和两个 QSMLA 路径。已有 matmul 数值回归不能代替 element 迁移。
+  gather 四个原始配置、concat 的 S32/FP16 容量及四个实际多线程 wrapper
+  已有下节所列的精确 functional 证据。
+- 当前结果限于已验收的 O2、dtype、shape 和别名 profile。任意 helper/alias
+  geometry、O0、未覆盖的原子类型和 ordering 仍需分别证明，不能从已有
+  `if`/`continue`/PHI、gather/scatter 或 atomic-add 用例推断支持。
+- API 的存储/view 能力与完整算法迁移分别记账。完整 CUBE_M16/A16、借用
+  accumulator range、row-broadcast element views，以及 QSMLA 的剩余
+  spill/索引阶段仍未闭环。gfsim/TimingSim 保留到独立 PR。
 
 ## 必须取得的证据
 
@@ -205,7 +203,10 @@ benchmark 源码 `056def2`。本轮结果：
 - 模型标准清单 310/310、完整差分 1,148,758/0；Linux CI 的 gfrun 也为 310/310。
   整体 CI 仍因 timing_test 和 gfsim lane 失败；nightly 另有三个同 ELF 的既有基线失败。
 
-原始 21 个应用、配置和四个 wrapper 的分母保持不变。上述数值通过不代表完整
-CUBE_M16/A16 element 迁移或剩余 QSMLA 配置已完成，gfsim/timing 后续另行验收。
+本轮机器可读结果中，64 个 regression case、17 个 TopK boundary profile、
+4 个实际 wrapper 和 21 条源码/配置库存路径分别计数，不能相互替代。库存中
+17 条已有精确 functional profile，余下 4 条继续 pending。七组 matmul 数值
+通过不代表完整 CUBE_M16/A16 element 迁移，QSMLA 剩余配置也尚未完成；
+gfsim/timing 后续另行验收。
 四个 PR 已解决冲突并推送，尚未合入。机器可读结果见同目录 JSON 的
 `conflict_repair_20261016`，冻结报告位于 `/tmp/pto-pr-repair-final-latest-v5/final-evidence.json`。

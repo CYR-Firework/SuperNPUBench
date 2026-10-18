@@ -115,7 +115,8 @@ def check_popn_native(disassembly, ir, profiles):
     for capacity, valid, ties, count in profiles:
         stem = f'qli_popn_{capacity}_{valid}_{int(ties)}_{count}'
         stores = [line for line in caller_ir.splitlines()
-                  if 'asm sideeffect "BSTART.TLSU TSTORE,' in line and '@' + stem + '_remaining,' in line]
+                  if re.search(r'asm sideeffect "BSTART\.(?:TSTORE\s|TLSU TSTORE,)', line)
+                  and '@' + stem + '_remaining,' in line]
         assert len(stores) == 1, stem
         assert '<' + str(capacity) + ' x i32>' in stores[0], stem
         if count == 0:

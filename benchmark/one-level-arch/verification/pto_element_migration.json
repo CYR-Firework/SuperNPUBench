@@ -7,7 +7,7 @@
       "id": "gather",
       "source": "benchmark/one-level-arch/kernels/basic_op/gather/detail/gather.hpp",
       "access_kind": "indexed_gm_load",
-      "status": "pending",
+      "status": "verified_functional_profile",
       "requirements": [
         "canonical_pto_element_for",
         "logical_element_arrays",
@@ -17,7 +17,22 @@
         "same_elf_gfrun",
         "zero_model_invariants"
       ],
-      "evidence": null,
+      "evidence": {
+        "conflict_repair_ref": "conflict_repair_20261016",
+        "configuration_coverage": "all four configurations listed by test/kernel/gather/compile.all, plus alias probes and the actual four-PE wrapper",
+        "cases": [
+          "gather_f32_0_original",
+          "gather_f32_0_alias_probe",
+          "gather_f32_1_original",
+          "gather_f32_1_alias_probe",
+          "gather_f32_2_original",
+          "gather_f32_2_alias_probe",
+          "gather_f32_3_original",
+          "gather_f32_3_alias_probe",
+          "gather_f32_3_index_alias_probe",
+          "gather_fourpe"
+        ]
+      },
       "configuration_source": "benchmark/one-level-arch/test/kernel/gather/compile.all",
       "configurations": [
         {
@@ -29,7 +44,9 @@
           "tM": 128,
           "tN": 128,
           "source_status": "documented",
-          "migration_status": "pending"
+          "migration_status": "verified_functional_profile",
+          "evidence_ref": "conflict_repair_20261016",
+          "case": "gather_f32_0_original"
         },
         {
           "dtype": "FP32",
@@ -40,7 +57,9 @@
           "tM": 128,
           "tN": 128,
           "source_status": "documented",
-          "migration_status": "pending"
+          "migration_status": "verified_functional_profile",
+          "evidence_ref": "conflict_repair_20261016",
+          "case": "gather_f32_1_original"
         },
         {
           "dtype": "FP32",
@@ -51,7 +70,9 @@
           "tM": 128,
           "tN": 128,
           "source_status": "documented",
-          "migration_status": "pending"
+          "migration_status": "verified_functional_profile",
+          "evidence_ref": "conflict_repair_20261016",
+          "case": "gather_f32_2_original"
         },
         {
           "dtype": "FP32",
@@ -62,7 +83,9 @@
           "tM": 32,
           "tN": 64,
           "source_status": "active",
-          "migration_status": "pending"
+          "migration_status": "verified_functional_profile",
+          "evidence_ref": "conflict_repair_20261016",
+          "case": "gather_f32_3_original"
         }
       ],
       "original_source": "benchmark/one-level-arch/kernels/single_thread/gather/gather.hpp"
@@ -210,7 +233,7 @@
       "id": "concat_scatter",
       "source": "benchmark/one-level-arch/kernels/basic_op/concat/detail/concat_scatter.hpp",
       "access_kind": "indexed_gm_store",
-      "status": "pending",
+      "status": "verified_functional_profile",
       "requirements": [
         "canonical_pto_element_for",
         "logical_element_arrays",
@@ -220,7 +243,17 @@
         "same_elf_gfrun",
         "zero_model_invariants"
       ],
-      "evidence": null,
+      "evidence": {
+        "conflict_repair_ref": "conflict_repair_20261016",
+        "configuration_coverage": "both original S32 and FP16 configurations, their alias probes, and the actual four-PE wrapper",
+        "cases": [
+          "concat_scatter_s32_original",
+          "concat_scatter_s32_alias_probe",
+          "concat_scatter_f16_original",
+          "concat_scatter_f16_alias_probe",
+          "concat_scatter_fourpe"
+        ]
+      },
       "configuration_source": "benchmark/one-level-arch/test/kernel/concat/compile.all",
       "configurations": [
         {
@@ -238,7 +271,9 @@
           ],
           "data_dim": 2,
           "concat_dim": 1,
-          "migration_status": "pending"
+          "migration_status": "verified_functional_profile",
+          "evidence_ref": "conflict_repair_20261016",
+          "case": "concat_scatter_s32_original"
         },
         {
           "dtype": "FP16",
@@ -255,7 +290,9 @@
           ],
           "data_dim": 2,
           "concat_dim": 1,
-          "migration_status": "pending"
+          "migration_status": "verified_functional_profile",
+          "evidence_ref": "conflict_repair_20261016",
+          "case": "concat_scatter_f16_original"
         }
       ],
       "original_source": "benchmark/one-level-arch/kernels/single_thread/concat/concat_scatter.hpp"
@@ -264,7 +301,7 @@
       "id": "broadcast",
       "source": "benchmark/one-level-arch/kernels/basic_op/broadcast/detail/broadcast.hpp",
       "access_kind": "affine_indexed_load",
-      "status": "pending",
+      "status": "verified_functional_profile",
       "requirements": [
         "canonical_pto_element_for",
         "logical_element_arrays",
@@ -274,14 +311,26 @@
         "same_elf_gfrun",
         "zero_model_invariants"
       ],
-      "evidence": null,
+      "evidence": {
+        "conflict_repair_ref": "conflict_repair_20261016",
+        "configuration_source": "benchmark/one-level-arch/test/kernel/element_wise/tile_element_suite/Makefile",
+        "cases": [
+          "broadcast_f16_2d_original",
+          "broadcast_f16_2d_alias_probe",
+          "broadcast_f16_3d_original",
+          "broadcast_f16_3d_alias_probe",
+          "broadcast_f16_5d_original",
+          "broadcast_f16_5d_alias_probe",
+          "broadcast_fourpe"
+        ]
+      },
       "original_source": "benchmark/one-level-arch/kernels/single_thread/broadcast/broadcast.hpp"
     },
     {
       "id": "broadcast_inline",
       "source": "benchmark/one-level-arch/kernels/basic_op/broadcast/broadcast_inline.hpp",
       "access_kind": "affine_indexed_load",
-      "status": "pending",
+      "status": "verified_functional_profile",
       "requirements": [
         "canonical_pto_element_for",
         "logical_element_arrays",
@@ -291,14 +340,21 @@
         "same_elf_gfrun",
         "zero_model_invariants"
       ],
-      "evidence": null,
+      "evidence": {
+        "conflict_repair_ref": "conflict_repair_20261016",
+        "configuration_source": "benchmark/one-level-arch/test/kernel/element_wise/tile_element_suite/Makefile",
+        "cases": [
+          "broadcast_inline_s32_original",
+          "broadcast_inline_s32_alias_probe"
+        ]
+      },
       "original_source": "benchmark/one-level-arch/kernels/single_thread/broadcast/broadcast_inline.hpp"
     },
     {
       "id": "transpose",
       "source": "benchmark/one-level-arch/kernels/basic_op/transpose/detail/transpose.hpp",
       "access_kind": "permuted_indexed_load",
-      "status": "pending",
+      "status": "verified_functional_profile",
       "requirements": [
         "canonical_pto_element_for",
         "logical_element_arrays",
@@ -308,7 +364,20 @@
         "same_elf_gfrun",
         "zero_model_invariants"
       ],
-      "evidence": null,
+      "evidence": {
+        "conflict_repair_ref": "conflict_repair_20261016",
+        "configuration_source": "benchmark/one-level-arch/test/kernel/element_wise/tile_element_suite/Makefile",
+        "cases": [
+          "transpose_f16_0_original",
+          "transpose_f16_0_alias_probe",
+          "transpose_f16_1_original",
+          "transpose_f16_1_alias_probe",
+          "transpose_f16_2_original",
+          "transpose_f16_2_alias_probe",
+          "transpose_f16_3_original",
+          "transpose_f16_3_alias_probe"
+        ]
+      },
       "original_source": "benchmark/one-level-arch/kernels/single_thread/transpose/transpose.hpp"
     },
     {
@@ -325,7 +394,11 @@
         "same_elf_gfrun",
         "zero_model_invariants"
       ],
-      "evidence": null,
+      "evidence": {
+        "source_migration": "pragma present in active source",
+        "qualification_status": "pending",
+        "remaining": "no exact conflict_repair_20261016 gfrun case maps to this source path"
+      },
       "original_source": "benchmark/one-level-arch/kernels/single_thread/control/hashtable_lookup_simd.hpp"
     },
     {
@@ -406,14 +479,20 @@
         "same_elf_gfrun",
         "zero_model_invariants"
       ],
-      "evidence": null,
+      "evidence": {
+        "conflict_repair_ref": "conflict_repair_20261016",
+        "configuration_source": "benchmark/one-level-arch/test/kernel/matmul/element_original_profiles.json",
+        "numerical_profiles_passed": 7,
+        "migration_status": "numerical_regression_only",
+        "claim_boundary": "does not close the CUBE_M16/A16 element migration"
+      },
       "original_source": "benchmark/one-level-arch/kernels/single_thread/matmul/matmul_mx.hpp"
     },
     {
       "id": "gather_v2",
       "source": "benchmark/one-level-arch/kernels/solution/gather_v2/gather_v2.hpp",
       "access_kind": "general_rank_indexed_load",
-      "status": "pending",
+      "status": "verified_functional_profile",
       "requirements": [
         "canonical_pto_element_for",
         "logical_element_arrays",
@@ -423,13 +502,23 @@
         "same_elf_gfrun",
         "zero_model_invariants"
       ],
-      "evidence": null
+      "evidence": {
+        "conflict_repair_ref": "conflict_repair_20261016",
+        "configuration_source": "benchmark/one-level-arch/test/solution/gather_v2/compile.all",
+        "configuration_coverage": "all three compile.all configurations; S32 rank-2 also has an alias probe",
+        "cases": [
+          "gather_v2_f32_0_original",
+          "gather_v2_s32_1_original",
+          "gather_v2_s32_1_alias_probe",
+          "gather_v2_f16_2_original"
+        ]
+      }
     },
     {
       "id": "view_copy",
       "source": "benchmark/one-level-arch/kernels/solution/view_copy/view_copy.hpp",
       "access_kind": "strided_gather_scatter",
-      "status": "pending",
+      "status": "verified_functional_profile",
       "requirements": [
         "canonical_pto_element_for",
         "logical_element_arrays",
@@ -439,13 +528,23 @@
         "same_elf_gfrun",
         "zero_model_invariants"
       ],
-      "evidence": null
+      "evidence": {
+        "conflict_repair_ref": "conflict_repair_20261016",
+        "configuration_source": "benchmark/one-level-arch/test/solution/view_copy/compile.all",
+        "configuration_coverage": "all three compile.all configurations; S32 also has an alias probe",
+        "cases": [
+          "view_copy_s32_0_original",
+          "view_copy_s32_0_alias_probe",
+          "view_copy_f16_1_original",
+          "view_copy_f16_2_tail"
+        ]
+      }
     },
     {
       "id": "qli_simple",
       "source": "benchmark/one-level-arch/kernels/solution/qli/qli_pto_opt_simple.hpp",
       "access_kind": "histogram_radix_selection",
-      "status": "pending",
+      "status": "verified_functional_profile",
       "requirements": [
         "canonical_pto_element_for",
         "logical_element_arrays",
@@ -455,13 +554,25 @@
         "same_elf_gfrun",
         "zero_model_invariants"
       ],
-      "evidence": null
+      "evidence": {
+        "conflict_repair_ref": "conflict_repair_20261016",
+        "configuration_source": "benchmark/one-level-arch/test/solution/qli/compile.all",
+        "qualified_sets": [
+          "qli-key: 48 profiles",
+          "qli-histogram: 72 profiles",
+          "qli-norm: 13 profiles",
+          "qli-popn: 18 profiles",
+          "qli-topk: 7 profiles",
+          "qli-original5: 5 original driver runs"
+        ],
+        "claim_boundary": "exact qualified profiles only; does not qualify QSMLA or every possible QLI configuration"
+      }
     },
     {
       "id": "qli_dynamic",
       "source": "benchmark/one-level-arch/kernels/solution/qli/qli_pto_opt_dynamic.hpp",
       "access_kind": "histogram_radix_selection",
-      "status": "pending",
+      "status": "verified_functional_profile",
       "requirements": [
         "canonical_pto_element_for",
         "logical_element_arrays",
@@ -471,7 +582,14 @@
         "same_elf_gfrun",
         "zero_model_invariants"
       ],
-      "evidence": null
+      "evidence": {
+        "conflict_repair_ref": "conflict_repair_20261016",
+        "configuration_source": "benchmark/one-level-arch/test/solution/qli/compile.all",
+        "qualified_sets": [
+          "qli-dynamic4: 4 dynamic driver runs"
+        ],
+        "claim_boundary": "the four recorded dynamic configurations only"
+      }
     },
     {
       "id": "quant_sparse_flash_mla",
@@ -487,7 +605,12 @@
         "same_elf_gfrun",
         "zero_model_invariants"
       ],
-      "evidence": null
+      "evidence": {
+        "source_migration": "pragma present in active source",
+        "qualification_status": "pending",
+        "configuration_source": "benchmark/one-level-arch/test/solution/quant_sparse_flash_mla/qsmla_cases.py",
+        "remaining": "original and dynamic QSMLA configurations are not closed by conflict_repair_20261016"
+      }
     },
     {
       "id": "qsmla_sparse_index_collection",
@@ -503,7 +626,12 @@
         "same_elf_gfrun",
         "zero_model_invariants"
       ],
-      "evidence": null
+      "evidence": {
+        "source_migration": "pragma present in active source",
+        "qualification_status": "pending",
+        "configuration_source": "benchmark/one-level-arch/test/solution/quant_sparse_flash_mla/qsmla_cases.py",
+        "remaining": "sparse index collection requires its own complete configuration and golden evidence"
+      }
     },
     {
       "id": "element_atomic_topk",
@@ -1421,7 +1549,7 @@
   },
   "element_api_remaining_gaps": [
     "CUBE_M16/A16 full matrix, borrowed accumulator range and row-broadcast element views remain outside this qualified API slice.",
-    "Remaining QSMLA source migration/configurations and complete original 21-application closure are unfinished.",
+    "Remaining QSMLA source migration/configurations and complete 21-entry source/configuration inventory closure are unfinished.",
     "This replay qualifies admitted O2 profiles; arbitrary helper/alias geometries and O0 are not qualified by these gates.",
     "gfsim/TimingSim parity is deferred to a separate PR."
   ],
@@ -1448,6 +1576,17 @@
       "tileop_api": "ef578d8d92289d270a17c02b918cd1df9b496ba8"
     },
     "evidence": "/tmp/pto-pr-repair-final-latest-v5/final-evidence.json",
+    "inventory_accounting": {
+      "source_path_entries": 21,
+      "verified_profile_entries": 17,
+      "pending_entries": [
+        "hashtable_lookup_simd",
+        "matmul_mx_scale_access",
+        "quant_sparse_flash_mla",
+        "qsmla_sparse_index_collection"
+      ],
+      "denominator_note": "These are source-path/configuration inventory entries, not 21 regression cases or 21 independently completed applications. A verified entry is limited to the exact configurations recorded in its evidence."
+    },
     "gfrun": {
       "pass": 64,
       "fail": 0,
@@ -1490,10 +1629,10 @@
         "prefix recurrence"
       ]
     },
-    "does_not_close_all_original_applications": true,
+    "does_not_close_all_inventory_entries": true,
     "remaining": [
       "CUBE_M16/A16 full element migration",
-      "remaining QSMLA configurations and full original 21-application closure",
+      "remaining QSMLA configurations and full 21-entry source/configuration inventory closure",
       "timing/gfsim qualification in separate PR"
     ]
   }

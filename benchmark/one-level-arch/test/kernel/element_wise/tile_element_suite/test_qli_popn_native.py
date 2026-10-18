@@ -35,6 +35,8 @@ class PopNNativeTest(unittest.TestCase):
         check_popn_native(NATIVE,IR,PROFILES)
         check_popn_native(NATIVE.replace('B.IOT t#1,', 'B.IOT t#1.reuse,'),
                           IR, PROFILES)
+        check_popn_native(NATIVE, IR.replace('BSTART.TLSU TSTORE,',
+                                            'BSTART.TSTORE'), PROFILES)
 
     def test_no_acceptance_from_unrelated_functions(self):
         for text in (NATIVE.replace('<RadixPopN_test.pto.local>:', '<unrelated>:'),
@@ -44,7 +46,8 @@ class PopNNativeTest(unittest.TestCase):
                 check_popn_native(text,IR,PROFILES)
 
     def test_returned_tile_and_scalar_call_attributes(self):
-        for text in (IR.replace('<128 x i32> %returned,','<128 x i32> %input,'),
+        for text in (IR.replace('BSTART.TLSU TSTORE,', 'BSTART.TLOAD'),
+                     IR.replace('<128 x i32> %returned,','<128 x i32> %input,'),
                      IR.replace('i32 noundef signext 1)','i32 noundef signext 2)'),
                      IR.replace('i32 noundef signext 4096,','i32 4096,'),
                      IR.replace('call inreg','call'),
