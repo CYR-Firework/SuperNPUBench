@@ -21,6 +21,39 @@ endif
 
 include ../../common/Makefile.common
 
+ifeq ($(PLAT),linx)
+ELEMENT_TARGET_FLAGS = $(if $(TARGET_TRIPLE),--target=$(TARGET_TRIPLE)) \
+	$(if $(SYSROOT),--sysroot=$(SYSROOT)) \
+	$(if $(RESOURCE_DIR),-resource-dir=$(RESOURCE_DIR))
+INCLUDE += $(if $(API_INCLUDE),-I$(API_INCLUDE))
+CC_OPTS += $(ELEMENT_TARGET_FLAGS)
+CC_LINK += $(ELEMENT_TARGET_FLAGS) -fuse-ld=lld
+
+ifneq ($(filter group_token_vec_mt_dyn,$(TESTCASE)),)
+HISTOGRAM_SRC := $(ROOT)/kernels/solution/group_token_vec/group_token_vec_mt_dyn_histogram.cpp
+HISTOGRAM_OBJ := $(OBJ_ROOT)/solution/group_token_vec/src/group_token_vec_mt_dyn_histogram.o
+EXTRA_OBJ_FILES += $(HISTOGRAM_OBJ)
+
+$(TARGET): $(HISTOGRAM_OBJ)
+
+$(HISTOGRAM_OBJ): $(HISTOGRAM_SRC)
+	@mkdir -p $(shell dirname $@)
+	$(CXX) $(CXX_O_ALL) $(INCLUDE) $(DEFINES) \
+		-mllvm -linxv5-enable-generic-element=true \
+		-fno-vectorize -fno-slp-vectorize -Werror=unknown-pragmas $< -o $@
+
+histogram-ir: pre_work
+	@test -n "$(IR_TARGET)" || \
+		(echo "IR_TARGET is required for histogram-ir" >&2; exit 1)
+	$(CXX) $(CXX_O_ALL) $(INCLUDE) $(DEFINES) \
+		-mllvm -linxv5-enable-generic-element=true \
+		-fno-vectorize -fno-slp-vectorize -Werror=unknown-pragmas \
+		-S -emit-llvm $(HISTOGRAM_SRC) -o $(IR_TARGET)
+endif
+endif
+
 clean:
 	@find $(OBJ_ROOT) -type f -name "*.o" -exec rm -rf {} \;
 	@rm -rf $(COMM_OBJ) $(LINK_SCRIPT)
+
+.PHONY: histogram-ir
