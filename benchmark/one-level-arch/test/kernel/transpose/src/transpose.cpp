@@ -3,7 +3,16 @@
 #include "benchmark.h"
 #include "fileop.h"
 #include "multi_thread_res_check.h"
-#include "basic_op/transpose/transpose.hpp"
+#ifdef TRANSPOSE_USE_V21
+#include "basic_op/transpose/transpose_2d_v2_1.hpp"
+#else
+#include "basic_op/transpose/transpose_2d_v2.hpp"
+#endif
+
+// 输出平坦切块大小，可通过 -DTRANSPOSE_TILE_ELEMENTS=... 扫描（需 8 的倍数以 32B 对齐）。
+#ifndef TRANSPOSE_TILE_ELEMENTS
+#define TRANSPOSE_TILE_ELEMENTS 512
+#endif
 
 namespace {
 alignas(4096) std::int32_t input[64 * 64];
@@ -23,8 +32,13 @@ int main() {
     res_check_publish_inputs(res_check_sync, tid);
 #endif
     BENCHSTART;
-    supernpu::multi_thread::transpose_2d<
-        std::int32_t, 64, 64, 16, 16>(input, output);
+#ifdef TRANSPOSE_USE_V21
+    supernpu::multi_thread::transpose_2d_v2_1<
+        std::int32_t, 64, 64, TRANSPOSE_TILE_ELEMENTS>(input, output);
+#else
+    supernpu::multi_thread::transpose_2d_v2<
+        std::int32_t, 64, 64, TRANSPOSE_TILE_ELEMENTS>(input, output);
+#endif
     BENCHEND;
 #ifdef RES_CHECK
     res_check_wait_for_all(res_check_sync, tid);
