@@ -91,6 +91,28 @@ inline int64_t qsmla_pa_physical_row(
 
 
 // ---------------------------------------------------------------------------
+// v3.1 addition: query GM layout.  BSND is (b, s, n, d); TND is (t, n, d)
+// with the flattened token row t = cu_seqlens_q[batch] + s (ops arch35
+// offset_calculator GM_Q_OUT_TND; the cu_seqlens array carries a leading
+// zero).  A null cu_seqlens_q degenerates to the uniform per-batch base
+// batch * S1, so one kernel serves both layouts.
+// ---------------------------------------------------------------------------
+struct QsmlaQueryConfig {
+    const int32_t *cu_seqlens_q = nullptr;  // TND prefix sums [B + 1], first 0
+    bool q_tnd = false;                     // false: BSND, true: TND
+};
+
+inline int64_t qsmla_q_token_base(
+    const QsmlaQueryConfig &qc, int32_t batch, int32_t s1)
+{
+    if (qc.q_tnd && qc.cu_seqlens_q != nullptr) {
+        return static_cast<int64_t>(qc.cu_seqlens_q[batch]);
+    }
+    return static_cast<int64_t>(batch) * s1;
+}
+
+
+// ---------------------------------------------------------------------------
 // Compile-time type/constant bundle for the v3 kernel.
 // ---------------------------------------------------------------------------
 template <typename qdtype, typename kvdtype, typename ModeConfig>
@@ -108,10 +130,10 @@ struct qsmla_v3_types {
     static constexpr int CmpS2 = ModeConfig::CmpS2;
     static constexpr int CmpTopK = ModeConfig::CmpTopK;
 
-    static_assert(G <= 64 && G % 16 == 0 && N1 % 16 == 0,
-                  "v3 requires G in [16,64] divisible by the 4-PE split");
+    static_assert(G % 16 == 0 && N1 % 16 == 0,
+                  "v3 requires G divisible by the 4-PE M16 split");
 
-    static constexpr int kGroupM = G;        // cooperative M (ops mRealSize)
+    static constexpr int kGroupM = Base::GSliceMax;  // 64-head G slice (ops mRealSize)
     static constexpr int kPeNum = 4;
     static constexpr int kPeTm = kGroupM / kPeNum;  // rows per PE (16)
     static constexpr int kS2Base = 128;      // ops s2BaseSize
@@ -182,7 +204,8 @@ void quant_sparse_flash_mla_csa_v3_1_4pe_pto(
     float q_descale, float ori_kv_descale, float cmp_kv_descale,
     int cmp_ratio, int win_left, int win_right,
     kvdtype *v0_res_scratch, float *mask_scratch, float *o_scratch,
-    const QsmlaPaConfig &pa = QsmlaPaConfig())
+    const QsmlaPaConfig &pa = QsmlaPaConfig(),
+    const QsmlaQueryConfig &qc = QsmlaQueryConfig())
 {
     using Types = qsmla_v3_types<qdtype, kvdtype, ModeConfig>;
     using tileQMatrix = typename Types::tileQMatrix;
@@ -216,7 +239,7 @@ void quant_sparse_flash_mla_csa_v3_1_4pe_pto(
     constexpr int kPeTm = Types::kPeTm;
     constexpr int kPeNum = Types::kPeNum;
     constexpr int kS2Base = Types::kS2Base;
-    constexpr int kWorkCount = Types::Base::B * S1 * N2;
+    constexpr int kWorkCount = Types::Base::WorkCount;
 
     constexpr float kProbScale = 16.0f;         // ops hifp8ScaleValue
     constexpr float kProbScaleRecip = 1.0f / 16.0f;
@@ -234,11 +257,19 @@ void quant_sparse_flash_mla_csa_v3_1_4pe_pto(
     int selected[CmpTopK > 0 ? CmpTopK : 1];
 
     for (int work = 0; work < kWorkCount; ++work) {
-        const int batch = work / (S1 * N2);
-        const int rem = work % (S1 * N2);
-        const int q_token = rem / N2;
-        const int kv_head = rem % N2;
-        const int q_row_base = (batch * S1 + q_token) * N1 + kv_head * Types::G;
+        // G slicing mirrors the v2 unified path: Config::decode_work yields the
+        // 64-head slice (g_slice) and the head base q_head_begin =
+        // kv_head*G + g_slice*GSliceMax, so the work order, Q row base and
+        // output offset all match the v2 layout.
+        const QsmlaWorkItem item = Types::Base::decode_work(work);
+        const int batch = item.batch;
+        const int q_token = item.q_token;
+        const int kv_head = item.kv_head;
+        // Q row layout (qc): BSND base is batch * S1, TND base is
+        // cu_seqlens_q[batch] (both give the same flattened token row for the
+        // uniform-length benchmark cases).
+        const int64_t q_tok = qsmla_q_token_base(qc, batch, S1) + q_token;
+        const int64_t q_row_base = q_tok * N1 + item.q_head_begin;
         // v3.1: BSND rows carry the per-batch base; PA_BBND rows are absolute
         // pool rows from the block table (base 0).
         const int64_t kOriBaseRow = (pa.ori_block_table == nullptr)
@@ -286,7 +317,7 @@ void quant_sparse_flash_mla_csa_v3_1_4pe_pto(
         int cnt = 0;
         {
             const int *cand =
-                cmp_indices + ((batch * S1 + q_token) * N2 + kv_head) * CmpTopK;
+                cmp_indices + (q_tok * N2 + kv_head) * CmpTopK;
             for (int k = 0; k < CmpTopK; ++k) {
                 const int idx = cand[k];
                 if (idx == -1) {
@@ -345,12 +376,16 @@ void quant_sparse_flash_mla_csa_v3_1_4pe_pto(
                     // Vec0 contiguous path); leftover rows stay dirty and are
                     // masked below.
                     if (tid == 0) {
+                        // One reused row tile: declaring it inside the loop
+                        // would allocate a fresh tile handle per row and
+                        // overflow the tile index (BackToFrontIndex assert)
+                        // for full 128-row blocks.
+                        tileKvRow tRow;
                         for (int r = 0; r < hi; ++r) {
                             const int64_t row = kOriBaseRow +
                                 qsmla_pa_physical_row(pa.ori_block_table,
                                     pa.ori_max_blocks, pa.ori_block_size,
                                     batch, range.begin + blk * kS2Base + r);
-                            tileKvRow tRow;
                             gmRowView gSrc(ori_kv_ptr + row * D);
                             TLOAD(tRow, gSrc);
                             gmRowView gDst(v0_res_scratch + r * D);
@@ -368,12 +403,14 @@ void quant_sparse_flash_mla_csa_v3_1_4pe_pto(
                     // Indexed gather: one 512 B row per TLOAD/TSTORE pair
                     // (ops CopyInSingleKv).  PE0 owns the staging so the
                     // shared load it initiates observes the completed stores.
+                    // The row tile is reused across the loop (see the ORI
+                    // staging note) to keep the tile-index footprint at one.
+                    tileKvRow tRow;
                     for (int r = 0; r < hi; ++r) {
                         const int64_t row = kCmpBaseRow +
                             qsmla_pa_physical_row(pa.cmp_block_table,
                                 pa.cmp_max_blocks, pa.cmp_block_size,
                                 batch, selected[row0 + r]);
-                        tileKvRow tRow;
                         gmRowView gSrc(cmp_kv_ptr + row * D);
                         TLOAD(tRow, gSrc);
                         gmRowView gDst(v0_res_scratch + r * D);

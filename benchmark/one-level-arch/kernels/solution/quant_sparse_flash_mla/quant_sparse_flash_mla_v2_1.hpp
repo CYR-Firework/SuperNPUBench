@@ -45,6 +45,28 @@ inline int64_t qsmla_pa_physical_row(
 }
 
 
+// ---------------------------------------------------------------------------
+// v2.1 addition: query GM layout.  BSND is (b, s, n, d); TND is (t, n, d) with
+// the flattened token row t = cu_seqlens_q[batch] + s (ops arch35
+// offset_calculator GM_Q_OUT_TND; the cu_seqlens array carries a leading
+// zero).  A null cu_seqlens_q degenerates to the uniform per-batch base
+// batch * S1, so one kernel serves both layouts.
+// ---------------------------------------------------------------------------
+struct QsmlaQueryConfig {
+    const int32_t *cu_seqlens_q = nullptr;  // TND prefix sums [B + 1], first 0
+    bool q_tnd = false;                     // false: BSND, true: TND
+};
+
+inline int64_t qsmla_q_token_base(
+    const QsmlaQueryConfig &qc, int32_t batch, int32_t s1)
+{
+    if (qc.q_tnd && qc.cu_seqlens_q != nullptr) {
+        return static_cast<int64_t>(qc.cu_seqlens_q[batch]);
+    }
+    return static_cast<int64_t>(batch) * s1;
+}
+
+
 // Unified five-mode four-PE TADD implementation (v2.1 adds PA_BBND KV).
 // Mode selection only decides
 // which logical ORI/CMP RANGE or INDEXED sources participate. Every source is
@@ -72,7 +94,8 @@ void quant_sparse_flash_mla_csa_v2_1_4pe_pto(
     float* score_scratch,
     qdtype* prob_scratch,
     float* pv_scratch,
-    const QsmlaPaConfig& pa = QsmlaPaConfig())
+    const QsmlaPaConfig& pa = QsmlaPaConfig(),
+    const QsmlaQueryConfig& qc = QsmlaQueryConfig())
 {
     using Config = typename ModeConfig::Base;
     constexpr int kPeNum = 4;
@@ -166,8 +189,14 @@ void quant_sparse_flash_mla_csa_v2_1_4pe_pto(
 
     for (int work_id = 0; work_id < Config::WorkCount; ++work_id) {
         const QsmlaWorkItem work = Config::decode_work(work_id);
-        qdtype* work_q = q_ptr + Config::q_work_offset(work);
-        const std::size_t work_out_offset = Config::out_work_offset(work);
+        // Q row layout (qc): BSND base is batch * S1, TND base is
+        // cu_seqlens_q[batch] (same flattened token row for uniform lengths).
+        const int64_t q_tok =
+            qsmla_q_token_base(qc, work.batch, Config::S1) + work.q_token;
+        qdtype* work_q =
+            q_ptr + (q_tok * Config::N1 + work.q_head_begin) * Config::D;
+        const std::size_t work_out_offset =
+            (q_tok * Config::N1 + work.q_head_begin) * Config::D;
         itQ gIterQ(work_q);
 
         // v2.1: BSND keeps the per-batch base row; PA_BBND uses the pool
@@ -198,12 +227,10 @@ void quant_sparse_flash_mla_csa_v2_1_4pe_pto(
             ori_count = range.end - range.begin;
         } else if constexpr (ModeConfig::HasIndexedOri) {
             const std::size_t list_offset =
-                ((static_cast<std::size_t>(work.batch) * Config::S1
-                  + work.q_token) * Config::N2 + work.kv_head)
+                (q_tok * Config::N2 + work.kv_head)
                 * ModeConfig::OriTopK;
             const std::size_t length_offset =
-                (static_cast<std::size_t>(work.batch) * Config::S1
-                 + work.q_token) * Config::N2 + work.kv_head;
+                q_tok * Config::N2 + work.kv_head;
             int candidate_count = ori_topk_length[length_offset];
             candidate_count = qsmla_sparse_clamp(
                 candidate_count, 0, ModeConfig::OriTopK);
@@ -226,12 +253,10 @@ void quant_sparse_flash_mla_csa_v2_1_4pe_pto(
                 cmp_count = cmp_valid_end;
             } else {
                 const std::size_t list_offset =
-                    ((static_cast<std::size_t>(work.batch) * Config::S1
-                      + work.q_token) * Config::N2 + work.kv_head)
+                    (q_tok * Config::N2 + work.kv_head)
                     * ModeConfig::CmpTopK;
                 const std::size_t length_offset =
-                    (static_cast<std::size_t>(work.batch) * Config::S1
-                     + work.q_token) * Config::N2 + work.kv_head;
+                    q_tok * Config::N2 + work.kv_head;
                 int candidate_count = ModeConfig::CmpTopK;
                 if (cmp_topk_length != nullptr) {
                     candidate_count = cmp_topk_length[length_offset];

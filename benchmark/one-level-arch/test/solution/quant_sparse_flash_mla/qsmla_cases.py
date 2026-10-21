@@ -303,6 +303,19 @@ _QSMLA_MODE_CASES: Tuple[QsmlaCase, ...] = (
               coverage=frozenset({"typical_csa", "bsnd_layout", "batch_gqa",
                                   "g128_split", "s1_ne_s2", "typical_large_s2"}),
               note="Compile-only: raw ORI KV input alone is 1 GiB in fp16."),
+    QsmlaCase(name="typical_bsnd_csa_s2_2048_topk1024_c4", mode="CSA",
+              b=8, s1=4, s2=2048, n1=128, n2=1, d=512, k=1024,
+              cmp_s2=4096, cmp_topk=1024, cmp_ratio=4, tm=64, tk=32,
+              td=64, win_left=128, win_right=576,
+              softmax_scale=0.04419417,
+              source="user:typical_csa_c4",
+              enable_stage="gfrun", reference_feasible=True,
+              mode_generation_feasible=True,
+              coverage=frozenset({"typical_csa", "bsnd_layout", "batch_gqa",
+                                  "g128_split", "s1_ne_s2", "typical_reduced_s2"}),
+              note="Network CSA case, C4 dead-data trim (S2 131072->2048, "
+                   "cmp_s2 32768->4096); block-wise equivalent to the "
+                   "production shape, 64 works per ELF."),
 )
 
 QSMLA_STAGE0_CASES = _QSMLA_STAGE0_CASES

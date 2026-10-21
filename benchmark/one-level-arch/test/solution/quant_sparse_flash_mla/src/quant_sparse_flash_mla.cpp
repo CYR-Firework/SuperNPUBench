@@ -1,7 +1,11 @@
 #include <common/pto_tileop.hpp>
 #include "benchmark.h"
 #include "fileop.h"
-#if defined(QSMLA_USE_CSA_V3_1_4PE)
+#if defined(QSMLA_USE_CSA_V3_0_1_4PE)
+#include "solution/quant_sparse_flash_mla/quant_sparse_flash_mla_v3_0_1.hpp"
+// v3.0.1 reuses the v3 kernel plumbing (scratch/ModeConfig/data guards).
+#define QSMLA_USE_CSA_V3_4PE
+#elif defined(QSMLA_USE_CSA_V3_1_4PE)
 #include "solution/quant_sparse_flash_mla/quant_sparse_flash_mla_v3_1.hpp"
 #elif defined(QSMLA_USE_CSA_V2_1_4PE)
 #include "solution/quant_sparse_flash_mla/quant_sparse_flash_mla_v2_1.hpp"
@@ -408,7 +412,13 @@ int main(){
     pa.ori_block_size = QSMLA_PA_BLOCK_SIZE;
     pa.cmp_block_size = QSMLA_PA_BLOCK_SIZE;
     pa.ori_max_blocks = (s2 + QSMLA_PA_BLOCK_SIZE - 1) / QSMLA_PA_BLOCK_SIZE;
-    pa.cmp_max_blocks = pa.ori_max_blocks;
+    pa.cmp_max_blocks =
+        (cmp_s2 + QSMLA_PA_BLOCK_SIZE - 1) / QSMLA_PA_BLOCK_SIZE;
+    // Query layout: TND flattened token rows.  cu_seqlens_q is optional; the
+    // uniform-length benchmark cases fall back to the per-batch base b * S1.
+    QsmlaQueryConfig qc;
+    qc.q_tnd = true;
+    qc.cu_seqlens_q = nullptr;
     quant_sparse_flash_mla_csa_v3_1_4pe_pto<
         qdtype, kvdtype, odttype, ModeConfig>(
             out, q, kv, cmp_kv,
@@ -416,7 +426,7 @@ int main(){
             softmax_scale_val,
             q_descale_val, ori_kv_descale_val, cmp_kv_descale_val,
             cmp_ratio, win_left, win_right,
-            v0_res_scratch, mask_scratch, o_scratch, pa);
+            v0_res_scratch, mask_scratch, o_scratch, pa, qc);
 #elif defined(QSMLA_USE_CSA_V2_1_4PE)
     // v2.1: unified tadd + PA_BBND block-table KV addressing.
     QsmlaPaConfig pa;
@@ -427,7 +437,13 @@ int main(){
     pa.ori_block_size = QSMLA_PA_BLOCK_SIZE;
     pa.cmp_block_size = QSMLA_PA_BLOCK_SIZE;
     pa.ori_max_blocks = (s2 + QSMLA_PA_BLOCK_SIZE - 1) / QSMLA_PA_BLOCK_SIZE;
-    pa.cmp_max_blocks = pa.ori_max_blocks;
+    pa.cmp_max_blocks =
+        (cmp_s2 + QSMLA_PA_BLOCK_SIZE - 1) / QSMLA_PA_BLOCK_SIZE;
+    // Query layout: TND flattened token rows (uniform benchmark cases use the
+    // per-batch base b * S1 via the null cu_seqlens_q fallback).
+    QsmlaQueryConfig qc;
+    qc.q_tnd = true;
+    qc.cu_seqlens_q = nullptr;
     quant_sparse_flash_mla_csa_v2_1_4pe_pto<
         qdtype, kvdtype, odttype, ModeConfig>(
             out, q, kv, cmp_kv,
@@ -435,7 +451,17 @@ int main(){
             softmax_scale_val,
             q_descale_val, ori_kv_descale_val, cmp_kv_descale_val,
             cmp_ratio, win_left, win_right,
-            score_scratch, prob_scratch, pv_scratch, pa);
+            score_scratch, prob_scratch, pv_scratch, pa, qc);
+#elif defined(QSMLA_USE_CSA_V3_0_1_4PE)
+    // v3.0.1: v3 body + G-slice for N1 > 64 (network-case experiments).
+    quant_sparse_flash_mla_csa_v3_0_1_4pe_pto<
+        qdtype, kvdtype, odttype, ModeConfig>(
+            out, q, kv, cmp_kv,
+            ori_indices, cmp_indices, ori_lengths, cmp_lengths,
+            softmax_scale_val,
+            q_descale_val, ori_kv_descale_val, cmp_kv_descale_val,
+            cmp_ratio, win_left, win_right,
+            v0_res_scratch, mask_scratch, o_scratch);
 #elif defined(QSMLA_USE_CSA_V3_4PE)
     // v3: ops-arch35-flow 4-PE CSA port (single-pass online softmax).
     quant_sparse_flash_mla_csa_v3_4pe_pto<
