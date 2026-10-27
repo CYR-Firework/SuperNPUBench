@@ -7,6 +7,10 @@
 #define QSMLA_USE_CSA_V3_4PE
 #elif defined(QSMLA_USE_CSA_V3_1_4PE)
 #include "solution/quant_sparse_flash_mla/quant_sparse_flash_mla_v3_1.hpp"
+#elif defined(QSMLA_USE_CSA_V3_1_1_4PE)
+#include "solution/quant_sparse_flash_mla/quant_sparse_flash_mla_v3_1_1.hpp"
+// v3.1.1 reuses the v3.1 plumbing (PA/TND scratch, ModeConfig, data guards).
+#define QSMLA_USE_CSA_V3_1_4PE
 #elif defined(QSMLA_USE_CSA_V2_1_4PE)
 #include "solution/quant_sparse_flash_mla/quant_sparse_flash_mla_v2_1.hpp"
 #elif (defined(QSMLA_USE_CSA_V3_4PE) || defined(QSMLA_USE_CSA_V3_1_4PE) || defined(QSMLA_USE_CSA_V2_1_4PE))
@@ -419,6 +423,17 @@ int main(){
     QsmlaQueryConfig qc;
     qc.q_tnd = true;
     qc.cu_seqlens_q = nullptr;
+#if defined(QSMLA_USE_CSA_V3_1_1_4PE)
+    // v3.1.1: v3.1 + full UB-resident O accumulator.
+    quant_sparse_flash_mla_csa_v3_1_1_4pe_pto<
+        qdtype, kvdtype, odttype, ModeConfig>(
+            out, q, kv, cmp_kv,
+            ori_indices, cmp_indices, ori_lengths, cmp_lengths,
+            softmax_scale_val,
+            q_descale_val, ori_kv_descale_val, cmp_kv_descale_val,
+            cmp_ratio, win_left, win_right,
+            v0_res_scratch, mask_scratch, o_scratch, pa, qc);
+#else
     quant_sparse_flash_mla_csa_v3_1_4pe_pto<
         qdtype, kvdtype, odttype, ModeConfig>(
             out, q, kv, cmp_kv,
@@ -427,6 +442,7 @@ int main(){
             q_descale_val, ori_kv_descale_val, cmp_kv_descale_val,
             cmp_ratio, win_left, win_right,
             v0_res_scratch, mask_scratch, o_scratch, pa, qc);
+#endif
 #elif defined(QSMLA_USE_CSA_V2_1_4PE)
     // v2.1: unified tadd + PA_BBND block-table KV addressing.
     QsmlaPaConfig pa;
