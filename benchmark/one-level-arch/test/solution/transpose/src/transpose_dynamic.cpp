@@ -3,7 +3,7 @@
 #include "benchmark.h"
 #include "fileop.h"
 #include "multi_thread_res_check.h"
-#include "basic_op/transpose/transpose_nd_dynamic.hpp"
+#include "solution/transpose/transpose_nd_dynamic.hpp"
 
 // 参数化动态 shape 测试（rank/shape/perm 均可 -D 覆盖），用于定位编译器 bug 的触发边界。
 #ifndef DYN_RANK

@@ -4,9 +4,9 @@
 #include "fileop.h"
 #include "multi_thread_res_check.h"
 #ifdef TRANSPOSE_USE_V21
-#include "basic_op/transpose/transpose_2d_v2_1.hpp"
+#include "solution/transpose/transpose_2d_v2_1.hpp"
 #else
-#include "basic_op/transpose/transpose_2d_v2.hpp"
+#include "solution/transpose/transpose_2d_v2.hpp"
 #endif
 
 // 大 case 2D 转置，用于检验"放大 tile 是否更优"。三个维度均可用 -D 覆盖。

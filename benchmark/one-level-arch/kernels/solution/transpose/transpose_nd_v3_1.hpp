@@ -331,7 +331,6 @@ void v31_gather(DType *input, DType *output, int tile_start, int tile_stride, bo
 }
 
 // ============================ 入口 ============================
-
 template <typename DType, int Rank, int Elements, int TileElements = 512,
           std::uint32_t PeCount = supernpu::multi_thread::kDefaultPeCount, int... Spec>
 void transpose_nd_v3_1(DType *input, DType *output) {

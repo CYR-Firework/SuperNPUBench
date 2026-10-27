@@ -3,7 +3,7 @@
 #include "benchmark.h"
 #include "fileop.h"
 #include "multi_thread_res_check.h"
-#include "basic_op/transpose/transpose_nd_v3_1.hpp"
+#include "solution/transpose/transpose_nd_v3_1.hpp"
 
 // v3.1 场景分派测试（对标 ops-math transpose 的 #1/#5/#7）：
 //   CASE=0  #1 TENSOR_MOVE  : 1D [4096], perm=[0]              （dim==1）

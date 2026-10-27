@@ -3,7 +3,7 @@
 #include "benchmark.h"
 #include "fileop.h"
 #include "multi_thread_res_check.h"
-#include "basic_op/transpose/transpose_nd_v4.hpp"
+#include "solution/transpose/transpose_nd_v4.hpp"
 
 // v4（对标 ops-math transpose_v2：固定 perm）测试。
 //   PERM_CASE=0: Per0213  [B,N,S,D]=[1,16,936,128] → [1,936,16,128]  (BNSD→BSND)

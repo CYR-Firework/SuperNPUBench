@@ -3,7 +3,7 @@
 #include "benchmark.h"
 #include "fileop.h"
 #include "multi_thread_res_check.h"
-#include "basic_op/transpose/transpose_nd_v3.hpp"
+#include "solution/transpose/transpose_nd_v3.hpp"
 
 // 真实 benchmark case（来自 tmp/transpose_case.txt），用 v3（通用 permute）测试。
 //   0  b32  int8     (1024,256,17)     perm [1,0,2]

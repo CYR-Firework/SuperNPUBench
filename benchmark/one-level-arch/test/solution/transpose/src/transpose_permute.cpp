@@ -3,7 +3,7 @@
 #include "benchmark.h"
 #include "fileop.h"
 #include "multi_thread_res_check.h"
-#include "basic_op/transpose/transpose_nd_v3.hpp"
+#include "solution/transpose/transpose_nd_v3.hpp"
 
 // 通用 permute 转置测试（v3）：
 //   PERM_CASE=0: 4D [1,16,936,128], perm=(0,2,1,3) → [1,936,16,128]（BNSD→BSND）

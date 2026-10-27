@@ -72,7 +72,7 @@ compile_operator "$REPO_ROOT/test/kernel/reduction/cumsum_row" "reduction/cumsum
 compile_operator "$REPO_ROOT/test/kernel/reduction/reducemax_row" "reduction/reducemax_row"
 compile_operator "$REPO_ROOT/test/kernel/reduction/reduceprod_row" "reduction/reduceprod_row"
 compile_operator "$REPO_ROOT/test/kernel/reduction/reducesum_row" "reduction/reducesum_row"
-compile_operator "$REPO_ROOT/test/kernel/transpose" "transpose"
+compile_operator "$REPO_ROOT/test/solution/transpose" "transpose"
 compile_operator "$REPO_ROOT/test/kernel/matmul" "matmul"
 compile_operator "$REPO_ROOT/test/kernel/fa" "fa"
 

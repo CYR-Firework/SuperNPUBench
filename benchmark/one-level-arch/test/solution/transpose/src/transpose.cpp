@@ -4,9 +4,9 @@
 #include "fileop.h"
 #include "multi_thread_res_check.h"
 #ifdef TRANSPOSE_USE_V21
-#include "basic_op/transpose/transpose_2d_v2_1.hpp"
+#include "solution/transpose/transpose_2d_v2_1.hpp"
 #else
-#include "basic_op/transpose/transpose_2d_v2.hpp"
+#include "solution/transpose/transpose_2d_v2.hpp"
 #endif
 
 // 输出平坦切块大小，可通过 -DTRANSPOSE_TILE_ELEMENTS=... 扫描（需 8 的倍数以 32B 对齐）。
