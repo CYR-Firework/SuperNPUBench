@@ -49,7 +49,7 @@ ifeq ($(TESTCASE), quant_sparse_flash_mla)
    # HIF8 remains the default dtype for the unified four-PE implementations.
    QSMLA_UNIFIED_IMPLS := swa_tadd_4pe hca_tadd_4pe csa_tadd_4pe ori_sparse_tadd_4pe ori_cmp_sparse_tadd_4pe
     QSMLA_1PE_IMPLS := csa_tadd_1pe
-    QSMLA_V3_IMPLS := csa_v3_4pe csa_v3_1_4pe csa_v3_0_1_4pe csa_v3_1_1_4pe
+    QSMLA_V3_IMPLS := csa_v3_4pe csa_v3_1_4pe csa_v3_0_1_4pe csa_v3_2_4pe
     # PA_BBND variants (v2.1 unified / v3.1 ops-flow) + block tables.
     QSMLA_V2_1_IMPLS := csa_v2_1_4pe
     # Dynamic-shape variant (v2): Vec tiles use DYNAMIC ValidRow/ValidCol.
@@ -164,25 +164,25 @@ ifeq ($(TESTCASE), quant_sparse_flash_mla)
       ifneq ($(QSMLA_DTYPE), HIF8)
          $(error csa_v3_1_4pe requires QSMLA_DTYPE=HIF8)
       endif
-    TARGET = $(ELF_HEAD)/$(TESTCASE)_B$(B)_s1$(s1)_oriS2$(s2)_cmpS2$(cmp_s2)_N1$(N1)_N2$(N2)_D$(D)_oriK$(ori_topk)_cmpK$(cmp_topk)_ratio$(cmp_ratio)_Tm$(Tm)_Tk$(Tk)_Td$(Td_block)_IMPL$(IMPL)_DTYPE$(QSMLA_DTYPE)_KVPABBND_INPUTembedded.elf
-    endif
+   TARGET = $(ELF_HEAD)/$(TESTCASE)_B$(B)_s1$(s1)_oriS2$(s2)_cmpS2$(cmp_s2)_N1$(N1)_N2$(N2)_D$(D)_oriK$(ori_topk)_cmpK$(cmp_topk)_ratio$(cmp_ratio)_Tm$(Tm)_Tk$(Tk)_Td$(Td_block)_IMPL$(IMPL)_DTYPE$(QSMLA_DTYPE)_KVPABBND_INPUTembedded.elf
+   endif
 
-    # v3.1.1: v3.1 + full UB-resident O accumulator (no GM o_scratch round-trip).
-    ifeq ($(IMPL), csa_v3_1_1_4pe)
-       DEFINES += -DQSMLA_USE_CSA_V3_1_1_4PE
-       DEFINES += -DQSMLA_PA_BLOCK_SIZE=128
-       QSMLA_SPARSE_CASE := csa_small
-       QSMLA_SPARSE_PA := on
-       ifeq ($(QSMLA_PA_ISOLATE), on)
-          DEFINES += -DQSMLA_PA_ISOLATE_NULL_TABLES
-       endif
-       ifneq ($(QSMLA_DTYPE), HIF8)
-          $(error csa_v3_1_1_4pe requires QSMLA_DTYPE=HIF8)
-       endif
-    TARGET = $(ELF_HEAD)/$(TESTCASE)_B$(B)_s1$(s1)_oriS2$(s2)_cmpS2$(cmp_s2)_N1$(N1)_N2$(N2)_D$(D)_oriK$(ori_topk)_cmpK$(cmp_topk)_ratio$(cmp_ratio)_Tm$(Tm)_Tk$(Tk)_Td$(Td_block)_IMPL$(IMPL)_DTYPE$(QSMLA_DTYPE)_KVPABBND_INPUTembedded.elf
-    endif
+   # v3.2: v3.1 + KV ping-pong double buffering (prefetch next block's KV).
+   ifeq ($(IMPL), csa_v3_2_4pe)
+      DEFINES += -DQSMLA_USE_CSA_V3_2_4PE
+      DEFINES += -DQSMLA_PA_BLOCK_SIZE=128
+      QSMLA_SPARSE_CASE := csa_small
+      QSMLA_SPARSE_PA := on
+      ifeq ($(QSMLA_PA_ISOLATE), on)
+         DEFINES += -DQSMLA_PA_ISOLATE_NULL_TABLES
+      endif
+      ifneq ($(QSMLA_DTYPE), HIF8)
+         $(error csa_v3_2_4pe requires QSMLA_DTYPE=HIF8)
+      endif
+   TARGET = $(ELF_HEAD)/$(TESTCASE)_B$(B)_s1$(s1)_oriS2$(s2)_cmpS2$(cmp_s2)_N1$(N1)_N2$(N2)_D$(D)_oriK$(ori_topk)_cmpK$(cmp_topk)_ratio$(cmp_ratio)_Tm$(Tm)_Tk$(Tk)_Td$(Td_block)_IMPL$(IMPL)_DTYPE$(QSMLA_DTYPE)_KVPABBND_INPUTembedded.elf
+   endif
 
-    # v2.1: unified five-mode tadd + PA_BBND block-table KV addressing.
+   # v2.1: unified five-mode tadd + PA_BBND block-table KV addressing.
    ifeq ($(IMPL), csa_v2_1_4pe)
       DEFINES += -DQSMLA_USE_CSA_V2_1_4PE
       DEFINES += -DQSMLA_PA_BLOCK_SIZE=128
@@ -279,11 +279,11 @@ ifeq ($(TESTCASE), quant_sparse_flash_mla)
       EXTRA_OBJ_FILES += $(QSMLA_Q_OBJ) $(QSMLA_ORI_KV_OBJ)
       DEFINES += -DQSMLA_USE_SPARSE_EMBEDDED_INPUT
 
-      ifneq ($(filter $(IMPL),hca_tadd_4pe csa_tadd_4pe ori_cmp_sparse_tadd_4pe csa_tadd_1pe csa_v3_4pe csa_v3_1_4pe csa_v3_0_1_4pe csa_v3_1_1_4pe csa_v2_1_4pe),)
+      ifneq ($(filter $(IMPL),hca_tadd_4pe csa_tadd_4pe ori_cmp_sparse_tadd_4pe csa_tadd_1pe csa_v3_4pe csa_v3_1_4pe csa_v3_0_1_4pe csa_v2_1_4pe csa_v3_2_4pe),)
          QSMLA_CMP_KV_OBJ := $(QSMLA_SPARSE_OBJ_DIR)/cmp_kv.o
          EXTRA_OBJ_FILES += $(QSMLA_CMP_KV_OBJ)
       endif
-       ifneq ($(filter $(IMPL),csa_tadd_4pe ori_cmp_sparse_tadd_4pe csa_tadd_1pe csa_v3_4pe csa_v3_1_4pe csa_v3_0_1_4pe csa_v3_1_1_4pe csa_v2_1_4pe),)
+       ifneq ($(filter $(IMPL),csa_tadd_4pe ori_cmp_sparse_tadd_4pe csa_tadd_1pe csa_v3_4pe csa_v3_1_4pe csa_v3_0_1_4pe csa_v2_1_4pe csa_v3_2_4pe),)
           QSMLA_CMP_INDEX_OBJ := $(QSMLA_SPARSE_OBJ_DIR)/cmp_indices.o
           EXTRA_OBJ_FILES += $(QSMLA_CMP_INDEX_OBJ)
        endif

@@ -7,9 +7,9 @@
 #define QSMLA_USE_CSA_V3_4PE
 #elif defined(QSMLA_USE_CSA_V3_1_4PE)
 #include "solution/quant_sparse_flash_mla/quant_sparse_flash_mla_v3_1.hpp"
-#elif defined(QSMLA_USE_CSA_V3_1_1_4PE)
-#include "solution/quant_sparse_flash_mla/quant_sparse_flash_mla_v3_1_1.hpp"
-// v3.1.1 reuses the v3.1 plumbing (PA/TND scratch, ModeConfig, data guards).
+#elif defined(QSMLA_USE_CSA_V3_2_4PE)
+#include "solution/quant_sparse_flash_mla/quant_sparse_flash_mla_v3_2.hpp"
+// v3.2 reuses the v3.1 plumbing (PA/TND scratch, ModeConfig, data guards).
 #define QSMLA_USE_CSA_V3_1_4PE
 #elif defined(QSMLA_USE_CSA_V2_1_4PE)
 #include "solution/quant_sparse_flash_mla/quant_sparse_flash_mla_v2_1.hpp"
@@ -366,7 +366,12 @@ int main(){
     // + 2 mask regions + O half-resident buffer (model-gap fallback).
     constexpr uint64_t out_bytes =
         static_cast<uint64_t>(B) * s1 * N1 * D * sizeof(odttype);
+#if defined(QSMLA_USE_CSA_V3_2_4PE)
+    // v3.2 KV ping-pong: two GM staging slices (one per in-flight block).
+    constexpr uint64_t v0_bytes = 2 * 128 * D * sizeof(kvdtype);
+#else
     constexpr uint64_t v0_bytes = 128 * D * sizeof(kvdtype);
+#endif
     constexpr uint64_t mask_bytes = 2 * (g_slice_max / 4) * 128 * sizeof(float);
     constexpr uint64_t o_bytes =
         static_cast<uint64_t>(B) * s1 * N1 * D * sizeof(float);
@@ -423,9 +428,9 @@ int main(){
     QsmlaQueryConfig qc;
     qc.q_tnd = true;
     qc.cu_seqlens_q = nullptr;
-#if defined(QSMLA_USE_CSA_V3_1_1_4PE)
-    // v3.1.1: v3.1 + full UB-resident O accumulator.
-    quant_sparse_flash_mla_csa_v3_1_1_4pe_pto<
+#if defined(QSMLA_USE_CSA_V3_2_4PE)
+    // v3.2: v3.1 + KV ping-pong double buffering (prefetch next block).
+    quant_sparse_flash_mla_csa_v3_2_4pe_pto<
         qdtype, kvdtype, odttype, ModeConfig>(
             out, q, kv, cmp_kv,
             ori_indices, cmp_indices, ori_lengths, cmp_lengths,
